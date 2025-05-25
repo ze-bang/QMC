@@ -1,4 +1,4 @@
-# QMC_cpp: State-of-the-Art Quantum Monte Carlo for Spin Hamiltonians
+# QMC_cpp: Quantum Monte Carlo for Spin Hamiltonians
 
 This library provides a modern C++ implementation of Quantum Monte Carlo (QMC) algorithms for simulating spin Hamiltonians on arbitrary lattices. It focuses on high performance, flexibility, and ease of use.
 
@@ -164,4 +164,3 @@ This library implements algorithms described in:
 - O.F. Syljuåsen and A.W. Sandvik, "Quantum Monte Carlo with directed loops", Phys. Rev. E 66, 046701 (2002)
 - M. Troyer, F. Alet, S. Trebst, "Path Integral Monte Carlo Simulation of Quantum Spin Models", AIP Conference Proceedings 690, 156 (2003)
 - N. Kawashima and K. Harada, "Recent Developments of World-Line Monte Carlo Methods", J. Phys. Soc. Jpn. 73, 1379 (2004)
-# QMC
