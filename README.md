@@ -37,8 +37,3 @@ The algorithm performs updates by:
 1. Diagonal updates (operator insertion/removal)
 2. Off-diagonal updates (operator sequence modification)
 3. Linked vertex updates for improved efficiency
-
-## References
-
-- Sandvik, A. W. (2010). Computational studies of quantum spin systems. AIP Conference Proceedings, 1297(1), 135-338.
-- Evertz, H. G. (2003). The loop algorithm. Advances in Physics, 52(1), 1-66.
