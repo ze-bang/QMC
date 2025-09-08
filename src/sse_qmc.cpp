@@ -284,9 +284,9 @@ void SSE_QMC::flip_spins_in_loop(int start_vertex) {
 void SSE_QMC::adjust_cutoff() {
     if (n_ > 0.7 * L_) {
         // Increase cutoff
-        int new_L = std::max(L_ + 100, static_cast<int>(1.2 * L_));
-        resize_operator_string();
-        L_ = new_L;
+    int new_L = std::max(L_ + 100, static_cast<int>(1.2 * L_));
+    L_ = new_L; // set new length before resize to use new size
+    resize_operator_string();
     }
 }
 
@@ -319,6 +319,11 @@ void SSE_QMC::print_statistics() const {
     std::cout << "  Average operator number: " << n_ << std::endl;
     std::cout << "  Cutoff length: " << L_ << std::endl;
     std::cout << "  Fill ratio: " << static_cast<double>(n_) / L_ << std::endl;
+}
+
+void SSE_QMC::save_results(const std::string& prefix) const {
+    observables_->save_results(prefix + "_observables.txt");
+    observables_->save_correlations(prefix + "_correlations.txt");
 }
 
 } // namespace SSE

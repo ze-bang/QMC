@@ -100,14 +100,13 @@ void Observables::measure_susceptibility(const std::vector<int>& spins) {
 void Observables::measure_specific_heat(const std::vector<int>& spins, int n_operators, double beta) {
     // Specific heat is related to energy fluctuations
     // C = β²(⟨E²⟩ - ⟨E⟩²)
-    
-    double energy = 0.0;
+    // We already record energy and energy^2 samples separately; here just ensure
+    // raw energy sample exists for variance calculation later.
+    double e_diag = 0.0;
     for (int bond = 0; bond < hamiltonian_->num_bonds(); ++bond) {
-        energy += hamiltonian_->diagonal_matrix_element(bond, spins);
+        e_diag += hamiltonian_->diagonal_matrix_element(bond, spins);
     }
-    energy -= static_cast<double>(n_operators) / beta;
-    energy /= lattice_->size();
-    
+    double energy = (e_diag - static_cast<double>(n_operators) / beta) / lattice_->size();
     get_or_create_observable("energy_squared").add_sample(energy * energy);
 }
 
@@ -231,11 +230,11 @@ void Observables::calculate_all_statistics() {
             for (size_t i = 0; i < energy.samples.size(); ++i) {
                 double e = energy.samples[i];
                 double e2 = energy_sq.samples[i];
-                specific_heat_samples.push_back(e2 - e * e);  // β² factor handled elsewhere
+                specific_heat_samples.push_back(e2 - e * e); // raw variance per site
             }
             
             auto& spec_heat = get_or_create_observable("specific_heat");
-            spec_heat.samples = specific_heat_samples;
+            spec_heat.samples = specific_heat_samples; // user can multiply by beta^2 externally if needed
             spec_heat.calculate_statistics();
         }
     }

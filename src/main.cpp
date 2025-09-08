@@ -191,9 +191,8 @@ int main(int argc, char* argv[]) {
         
         std::cout << "\nSimulation completed in " << duration.count() << " seconds" << std::endl;
         
-        // Save results
-        // Note: The observables are owned by the QMC object, so we'd need to add getter methods
-        // For now, results are printed to console
+    // Save results to disk
+    qmc->save_results(params.output_prefix);
         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;

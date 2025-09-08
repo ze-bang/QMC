@@ -83,6 +83,9 @@ public:
     const std::vector<int>& get_spins() const { return spins_; }
     const Lattice& get_lattice() const { return *lattice_; }
     const Hamiltonian& get_hamiltonian() const { return *hamiltonian_; }
+    const Observables& get_observables() const { return *observables_; }
+    Observables& access_observables() { return *observables_; }
+    void save_results(const std::string& prefix) const;
     
 private:
     // Helper methods
