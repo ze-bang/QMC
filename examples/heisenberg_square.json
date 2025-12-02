@@ -1,0 +1,20 @@
+{
+    "lattice": {
+        "type": "square",
+        "Lx": 16,
+        "Ly": 16
+    },
+    "model": {
+        "type": "heisenberg",
+        "J": 1.0
+    },
+    "simulation": {
+        "beta": 2.0,
+        "thermalization": 10000,
+        "sweeps": 100000,
+        "bins": 100,
+        "seed": 42
+    },
+    "output": "results.json",
+    "verbose": true
+}

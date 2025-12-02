@@ -1,319 +1,279 @@
-#include "lattice.h"
-#include <iostream>
-#include <cmath>
+/**
+ * @file lattice.cpp
+ * @brief Implementation of lattice structures
+ */
+
+#include "sse/lattice.hpp"
+#include <fmt/format.h>
+#include <stdexcept>
 #include <algorithm>
-#include <numeric>
+#include <iostream>
 
-namespace SSE {
+namespace sse {
 
-// Base Lattice implementation
-void Lattice::add_site(int index, const std::vector<double>& position) {
-    sites_.emplace_back(index, position);
+Lattice::Lattice(SiteIdx n_sites, const std::vector<Bond>& bonds)
+    : n_sites_(n_sites), bonds_(bonds) {
+    buildSiteBonds();
 }
 
-void Lattice::add_bond(int site1, int site2, double coupling, const std::string& type) {
-    bonds_.emplace_back(site1, site2, coupling, type);
-}
-
-void Lattice::build_neighbor_list() {
-    neighbors_.clear();
-    neighbors_.resize(sites_.size());
+void Lattice::buildSiteBonds() {
+    site_bonds_.resize(n_sites_);
+    for (auto& sb : site_bonds_) sb.clear();
     
-    for (const auto& bond : bonds_) {
-        neighbors_[bond.site1].push_back(bond.site2);
-        neighbors_[bond.site2].push_back(bond.site1);
-    }
-    
-    // Remove duplicates and sort
-    for (auto& neighbor_list : neighbors_) {
-        std::sort(neighbor_list.begin(), neighbor_list.end());
-        neighbor_list.erase(std::unique(neighbor_list.begin(), neighbor_list.end()), 
-                           neighbor_list.end());
-    }
-}
-
-double Lattice::get_coordination_number() const {
-    if (neighbors_.empty()) return 0.0;
-    
-    double total = 0.0;
-    for (const auto& neighbor_list : neighbors_) {
-        total += neighbor_list.size();
-    }
-    return total / sites_.size();
-}
-
-void Lattice::print_info() const {
-    std::cout << "Lattice Information:" << std::endl;
-    std::cout << "  Name: " << get_name() << std::endl;
-    std::cout << "  Dimension: " << dimension_ << std::endl;
-    std::cout << "  Number of sites: " << sites_.size() << std::endl;
-    std::cout << "  Number of bonds: " << bonds_.size() << std::endl;
-    std::cout << "  Coordination number: " << get_coordination_number() << std::endl;
-}
-
-// Square Lattice implementation
-SquareLattice::SquareLattice(int Lx, int Ly, bool periodic) 
-    : Lattice(2), Lx_(Lx), Ly_(Ly), periodic_(periodic) {
-    generate_lattice();
-}
-
-void SquareLattice::generate_lattice() {
-    sites_.clear();
-    bonds_.clear();
-    
-    // Generate sites
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            int index = y * Lx_ + x;
-            sites_.emplace_back(index, std::vector<double>{static_cast<double>(x), static_cast<double>(y)});
+    n_bond_types_ = 0;
+    for (BondIdx b = 0; b < numBonds(); ++b) {
+        const auto& bond = bonds_[b];
+        if (bond.i >= n_sites_ || bond.j >= n_sites_) {
+            throw std::runtime_error(fmt::format(
+                "Invalid bond ({}, {}): sites must be < {}", 
+                bond.i, bond.j, n_sites_));
         }
+        site_bonds_[bond.i].push_back(b);
+        site_bonds_[bond.j].push_back(b);
+        n_bond_types_ = std::max(n_bond_types_, bond.type + 1);
     }
     
-    // Generate bonds
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            int site = get_site_index(x, y);
-            
-            // Horizontal bonds
-            if (x < Lx_ - 1) {
-                int neighbor = get_site_index(x + 1, y);
-                bonds_.emplace_back(site, neighbor, 1.0, "horizontal");
-            } else if (periodic_) {
-                int neighbor = get_site_index(0, y);
-                bonds_.emplace_back(site, neighbor, 1.0, "horizontal");
-            }
-            
-            // Vertical bonds
-            if (y < Ly_ - 1) {
-                int neighbor = get_site_index(x, y + 1);
-                bonds_.emplace_back(site, neighbor, 1.0, "vertical");
-            } else if (periodic_) {
-                int neighbor = get_site_index(x, 0);
-                bonds_.emplace_back(site, neighbor, 1.0, "vertical");
-            }
-        }
+    max_coordination_ = 0;
+    for (SiteIdx s = 0; s < n_sites_; ++s) {
+        max_coordination_ = std::max(max_coordination_, 
+                                     static_cast<int>(site_bonds_[s].size()));
+    }
+}
+
+std::vector<SiteIdx> Lattice::neighbors(SiteIdx site) const {
+    std::vector<SiteIdx> result;
+    for (BondIdx b : site_bonds_[site]) {
+        const auto& bond = bonds_[b];
+        result.push_back(bond.i == site ? bond.j : bond.i);
+    }
+    return result;
+}
+
+std::vector<int> Lattice::siteCoords(SiteIdx site) const {
+    if (dimensions_.empty()) return {};
+    
+    std::vector<int> coords(dimensions_.size());
+    SiteIdx s = site;
+    for (int d = static_cast<int>(dimensions_.size()) - 1; d >= 0; --d) {
+        coords[d] = s % dimensions_[d];
+        s /= dimensions_[d];
+    }
+    return coords;
+}
+
+SiteIdx Lattice::coordsToSite(const std::vector<int>& coords) const {
+    if (coords.size() != dimensions_.size()) {
+        throw std::runtime_error("Coordinate dimension mismatch");
     }
     
-    build_neighbor_list();
+    SiteIdx site = 0;
+    for (size_t d = 0; d < dimensions_.size(); ++d) {
+        site = site * dimensions_[d] + coords[d];
+    }
+    return site;
 }
 
-int SquareLattice::get_site_index(int x, int y) const {
-    return y * Lx_ + x;
-}
-
-std::pair<int, int> SquareLattice::get_coordinates(int site) const {
-    return {site % Lx_, site / Lx_};
-}
-
-// Triangular Lattice implementation
-TriangularLattice::TriangularLattice(int Lx, int Ly, bool periodic) 
-    : Lattice(2), Lx_(Lx), Ly_(Ly), periodic_(periodic) {
-    generate_lattice();
-}
-
-void TriangularLattice::generate_lattice() {
-    sites_.clear();
-    bonds_.clear();
+Lattice Lattice::chain(SiteIdx L, bool periodic) {
+    std::vector<Bond> bonds;
+    bonds.reserve(L);
     
-    // Generate sites
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            int index = y * Lx_ + x;
-            double pos_x = x + 0.5 * (y % 2);
-            double pos_y = y * std::sqrt(3.0) / 2.0;
-            sites_.emplace_back(index, std::vector<double>{pos_x, pos_y});
-        }
+    SiteIdx n_bonds = periodic ? L : L - 1;
+    for (SiteIdx i = 0; i < n_bonds; ++i) {
+        bonds.emplace_back(i, (i + 1) % L);
     }
     
-    // Generate bonds
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            int site = get_site_index(x, y);
-            
-            // Horizontal bonds
-            if (x < Lx_ - 1) {
-                int neighbor = get_site_index(x + 1, y);
-                bonds_.emplace_back(site, neighbor, 1.0, "horizontal");
-            } else if (periodic_) {
-                int neighbor = get_site_index(0, y);
-                bonds_.emplace_back(site, neighbor, 1.0, "horizontal");
+    Lattice lat(L, bonds);
+    lat.type_ = LatticeType::Chain;
+    lat.dimensions_ = {L};
+    return lat;
+}
+
+Lattice Lattice::square(SiteIdx Lx, SiteIdx Ly, bool periodic) {
+    SiteIdx N = Lx * Ly;
+    std::vector<Bond> bonds;
+    bonds.reserve(2 * N);
+    
+    auto idx = [Lx](SiteIdx x, SiteIdx y) { return y * Lx + x; };
+    
+    for (SiteIdx y = 0; y < Ly; ++y) {
+        for (SiteIdx x = 0; x < Lx; ++x) {
+            // Horizontal bond
+            if (periodic || x + 1 < Lx) {
+                bonds.emplace_back(idx(x, y), idx((x + 1) % Lx, y));
             }
-            
-            // Diagonal bonds (up-right and up-left)
-            if (y < Ly_ - 1) {
-                if (y % 2 == 0) {  // Even rows
-                    // Up-right
-                    int neighbor = get_site_index(x, y + 1);
-                    bonds_.emplace_back(site, neighbor, 1.0, "diagonal1");
-                    
-                    // Up-left
-                    if (x > 0) {
-                        neighbor = get_site_index(x - 1, y + 1);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    } else if (periodic_) {
-                        neighbor = get_site_index(Lx_ - 1, y + 1);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    }
-                } else {  // Odd rows
-                    // Up-left
-                    int neighbor = get_site_index(x, y + 1);
-                    bonds_.emplace_back(site, neighbor, 1.0, "diagonal1");
-                    
-                    // Up-right
-                    if (x < Lx_ - 1) {
-                        neighbor = get_site_index(x + 1, y + 1);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    } else if (periodic_) {
-                        neighbor = get_site_index(0, y + 1);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    }
-                }
-            } else if (periodic_) {
-                // Handle periodic boundary in y-direction
-                if (y % 2 == 0) {
-                    int neighbor = get_site_index(x, 0);
-                    bonds_.emplace_back(site, neighbor, 1.0, "diagonal1");
-                    
-                    if (x > 0) {
-                        neighbor = get_site_index(x - 1, 0);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    } else {
-                        neighbor = get_site_index(Lx_ - 1, 0);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    }
-                } else {
-                    int neighbor = get_site_index(x, 0);
-                    bonds_.emplace_back(site, neighbor, 1.0, "diagonal1");
-                    
-                    if (x < Lx_ - 1) {
-                        neighbor = get_site_index(x + 1, 0);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    } else {
-                        neighbor = get_site_index(0, 0);
-                        bonds_.emplace_back(site, neighbor, 1.0, "diagonal2");
-                    }
-                }
+            // Vertical bond
+            if (periodic || y + 1 < Ly) {
+                bonds.emplace_back(idx(x, y), idx(x, (y + 1) % Ly));
             }
         }
     }
     
-    build_neighbor_list();
+    Lattice lat(N, bonds);
+    lat.type_ = LatticeType::Square;
+    lat.dimensions_ = {Lx, Ly};
+    return lat;
 }
 
-int TriangularLattice::get_site_index(int x, int y) const {
-    return y * Lx_ + x;
-}
-
-std::pair<int, int> TriangularLattice::get_coordinates(int site) const {
-    return {site % Lx_, site / Lx_};
-}
-
-// 1D Chain implementation
-Chain::Chain(int L, bool periodic) : Lattice(1), L_(L), periodic_(periodic) {
-    generate_lattice();
-}
-
-void Chain::generate_lattice() {
-    sites_.clear();
-    bonds_.clear();
+Lattice Lattice::triangular(SiteIdx Lx, SiteIdx Ly, bool periodic) {
+    SiteIdx N = Lx * Ly;
+    std::vector<Bond> bonds;
+    bonds.reserve(3 * N);
     
-    // Generate sites
-    for (int i = 0; i < L_; ++i) {
-        sites_.emplace_back(i, std::vector<double>{static_cast<double>(i)});
-    }
+    auto idx = [Lx](SiteIdx x, SiteIdx y) { return y * Lx + x; };
     
-    // Generate bonds
-    for (int i = 0; i < L_ - 1; ++i) {
-        bonds_.emplace_back(i, i + 1, 1.0, "nearest_neighbor");
-    }
-    
-    if (periodic_ && L_ > 2) {
-        bonds_.emplace_back(L_ - 1, 0, 1.0, "nearest_neighbor");
-    }
-    
-    build_neighbor_list();
-}
-
-// Honeycomb Lattice implementation
-HoneycombLattice::HoneycombLattice(int Lx, int Ly, bool periodic) 
-    : Lattice(2), Lx_(Lx), Ly_(Ly), periodic_(periodic) {
-    generate_lattice();
-}
-
-void HoneycombLattice::generate_lattice() {
-    sites_.clear();
-    bonds_.clear();
-    
-    // Generate sites (2 sites per unit cell)
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            // A sublattice
-            int index_A = get_site_index(x, y, 0);
-            double pos_x_A = x * 1.5;
-            double pos_y_A = y * std::sqrt(3.0) + (x % 2) * std::sqrt(3.0) / 2.0;
-            sites_.emplace_back(index_A, std::vector<double>{pos_x_A, pos_y_A});
-            
-            // B sublattice
-            int index_B = get_site_index(x, y, 1);
-            double pos_x_B = x * 1.5 + 0.5;
-            double pos_y_B = y * std::sqrt(3.0) + (x % 2) * std::sqrt(3.0) / 2.0;
-            sites_.emplace_back(index_B, std::vector<double>{pos_x_B, pos_y_B});
+    for (SiteIdx y = 0; y < Ly; ++y) {
+        for (SiteIdx x = 0; x < Lx; ++x) {
+            // Horizontal
+            if (periodic || x + 1 < Lx) {
+                bonds.emplace_back(idx(x, y), idx((x + 1) % Lx, y));
+            }
+            // Vertical
+            if (periodic || y + 1 < Ly) {
+                bonds.emplace_back(idx(x, y), idx(x, (y + 1) % Ly));
+            }
+            // Diagonal
+            if ((periodic || (x + 1 < Lx && y + 1 < Ly))) {
+                bonds.emplace_back(idx(x, y), idx((x + 1) % Lx, (y + 1) % Ly));
+            }
         }
     }
     
-    // Generate bonds within unit cells and between neighboring cells
-    for (int y = 0; y < Ly_; ++y) {
-        for (int x = 0; x < Lx_; ++x) {
-            int site_A = get_site_index(x, y, 0);
-            int site_B = get_site_index(x, y, 1);
+    Lattice lat(N, bonds);
+    lat.type_ = LatticeType::Triangular;
+    lat.dimensions_ = {Lx, Ly};
+    return lat;
+}
+
+Lattice Lattice::honeycomb(SiteIdx Lx, SiteIdx Ly, bool periodic) {
+    // 2 sites per unit cell
+    SiteIdx N = 2 * Lx * Ly;
+    std::vector<Bond> bonds;
+    bonds.reserve(3 * Lx * Ly);
+    
+    // Site indexing: (x, y, sublattice) -> site index
+    auto idx = [Lx, Ly](SiteIdx x, SiteIdx y, int sub) {
+        return 2 * ((y % Ly) * Lx + (x % Lx)) + sub;
+    };
+    
+    for (SiteIdx y = 0; y < Ly; ++y) {
+        for (SiteIdx x = 0; x < Lx; ++x) {
+            // A-B bond within unit cell
+            bonds.emplace_back(idx(x, y, 0), idx(x, y, 1));
             
-            // Bond within unit cell
-            bonds_.emplace_back(site_A, site_B, 1.0, "intracell");
+            // A(x,y) to B(x-1, y)
+            if (periodic || x > 0) {
+                bonds.emplace_back(idx(x, y, 0), idx((x - 1 + Lx) % Lx, y, 1));
+            }
+            
+            // A(x,y) to B(x, y-1)
+            if (periodic || y > 0) {
+                bonds.emplace_back(idx(x, y, 0), idx(x, (y - 1 + Ly) % Ly, 1));
+            }
+        }
+    }
+    
+    Lattice lat(N, bonds);
+    lat.type_ = LatticeType::Honeycomb;
+    lat.dimensions_ = {Lx, Ly};
+    return lat;
+}
+
+Lattice Lattice::kagome(SiteIdx Lx, SiteIdx Ly, bool periodic) {
+    // 3 sites per unit cell
+    SiteIdx N = 3 * Lx * Ly;
+    std::vector<Bond> bonds;
+    bonds.reserve(6 * Lx * Ly);
+    
+    auto idx = [Lx, Ly](SiteIdx x, SiteIdx y, int sub) {
+        return 3 * ((y % Ly) * Lx + (x % Lx)) + sub;
+    };
+    
+    for (SiteIdx y = 0; y < Ly; ++y) {
+        for (SiteIdx x = 0; x < Lx; ++x) {
+            // Bonds within unit cell (triangle)
+            bonds.emplace_back(idx(x, y, 0), idx(x, y, 1));
+            bonds.emplace_back(idx(x, y, 1), idx(x, y, 2));
+            bonds.emplace_back(idx(x, y, 2), idx(x, y, 0));
             
             // Bonds to neighboring cells
-            if (x % 2 == 0) {
-                // Even x: connect to upper neighbors
-                if (y < Ly_ - 1) {
-                    int neighbor_A = get_site_index(x, y + 1, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
-                } else if (periodic_) {
-                    int neighbor_A = get_site_index(x, 0, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
+            if (periodic || x + 1 < Lx) {
+                bonds.emplace_back(idx(x, y, 1), idx((x + 1) % Lx, y, 0));
+            }
+            if (periodic || y + 1 < Ly) {
+                bonds.emplace_back(idx(x, y, 2), idx(x, (y + 1) % Ly, 0));
+            }
+            if (periodic || (x + 1 < Lx && y + 1 < Ly)) {
+                bonds.emplace_back(idx(x, y, 2), idx((x + 1) % Lx, (y + 1) % Ly, 1));
+            }
+        }
+    }
+    
+    Lattice lat(N, bonds);
+    lat.type_ = LatticeType::Kagome;
+    lat.dimensions_ = {Lx, Ly};
+    return lat;
+}
+
+Lattice Lattice::cubic(SiteIdx Lx, SiteIdx Ly, SiteIdx Lz, bool periodic) {
+    SiteIdx N = Lx * Ly * Lz;
+    std::vector<Bond> bonds;
+    bonds.reserve(3 * N);
+    
+    auto idx = [Lx, Ly](SiteIdx x, SiteIdx y, SiteIdx z) {
+        return z * Lx * Ly + y * Lx + x;
+    };
+    
+    for (SiteIdx z = 0; z < Lz; ++z) {
+        for (SiteIdx y = 0; y < Ly; ++y) {
+            for (SiteIdx x = 0; x < Lx; ++x) {
+                // x-direction
+                if (periodic || x + 1 < Lx) {
+                    bonds.emplace_back(idx(x, y, z), idx((x + 1) % Lx, y, z));
                 }
-                
-                if (x < Lx_ - 1) {
-                    int neighbor_A = get_site_index(x + 1, y, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
-                } else if (periodic_) {
-                    int neighbor_A = get_site_index(0, y, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
+                // y-direction
+                if (periodic || y + 1 < Ly) {
+                    bonds.emplace_back(idx(x, y, z), idx(x, (y + 1) % Ly, z));
                 }
-            } else {
-                // Odd x: connect to lower neighbors
-                if (y > 0) {
-                    int neighbor_A = get_site_index(x, y - 1, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
-                } else if (periodic_) {
-                    int neighbor_A = get_site_index(x, Ly_ - 1, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
-                }
-                
-                if (x < Lx_ - 1) {
-                    int neighbor_A = get_site_index(x + 1, y, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
-                } else if (periodic_) {
-                    int neighbor_A = get_site_index(0, y, 0);
-                    bonds_.emplace_back(site_B, neighbor_A, 1.0, "intercell");
+                // z-direction
+                if (periodic || z + 1 < Lz) {
+                    bonds.emplace_back(idx(x, y, z), idx(x, y, (z + 1) % Lz));
                 }
             }
         }
     }
     
-    build_neighbor_list();
+    Lattice lat(N, bonds);
+    lat.type_ = LatticeType::Cubic;
+    lat.dimensions_ = {Lx, Ly, Lz};
+    return lat;
 }
 
-int HoneycombLattice::get_site_index(int x, int y, int sublattice) const {
-    return 2 * (y * Lx_ + x) + sublattice;
+Lattice Lattice::custom(SiteIdx n_sites, const std::vector<Bond>& bonds) {
+    Lattice lat(n_sites, bonds);
+    lat.type_ = LatticeType::Custom;
+    return lat;
 }
 
-} // namespace SSE
+void Lattice::print() const {
+    const char* type_names[] = {
+        "Chain", "Square", "Triangular", "Honeycomb", "Kagome", "Cubic", "Custom"
+    };
+    
+    std::cout << fmt::format("Lattice: {} with {} sites and {} bonds\n",
+                             type_names[static_cast<int>(type_)],
+                             n_sites_, bonds_.size());
+    
+    if (!dimensions_.empty()) {
+        std::cout << "  Dimensions: [";
+        for (size_t i = 0; i < dimensions_.size(); ++i) {
+            std::cout << dimensions_[i];
+            if (i + 1 < dimensions_.size()) std::cout << " x ";
+        }
+        std::cout << "]\n";
+    }
+    
+    std::cout << fmt::format("  Max coordination: {}\n", max_coordination_);
+    std::cout << fmt::format("  Bond types: {}\n", n_bond_types_);
+}
+
+} // namespace sse

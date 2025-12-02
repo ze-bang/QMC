@@ -1,256 +1,238 @@
-#include "hamiltonian.h"
+/**
+ * @file hamiltonian.cpp
+ * @brief Implementation of Hamiltonian class
+ */
+
+#include "sse/hamiltonian.hpp"
+#include <fmt/format.h>
 #include <iostream>
+#include <algorithm>
 #include <cmath>
-#include <stdexcept>
 
-namespace SSE {
+namespace sse {
 
-// Base Hamiltonian implementation
-Hamiltonian::Hamiltonian(std::shared_ptr<Lattice> lattice) 
-    : lattice_(lattice), total_diagonal_weight_(0.0) {
-    bonds_ = lattice_->get_bonds();
+Hamiltonian::Hamiltonian(const BondMatrix& bond_matrix) {
+    bond_matrices_.push_back(bond_matrix);
+    computeEnergyOffsets();
 }
 
-void Hamiltonian::add_term(const std::vector<int>& sites, 
-                          const std::vector<std::string>& operators, 
-                          double coefficient) {
-    if (sites.size() != operators.size()) {
-        throw std::invalid_argument("Number of sites must match number of operators");
-    }
-    terms_.emplace_back(sites, operators, coefficient);
+Hamiltonian::Hamiltonian(const std::vector<BondMatrix>& bond_matrices)
+    : bond_matrices_(bond_matrices) {
+    computeEnergyOffsets();
 }
 
-double Hamiltonian::diagonal_matrix_element(int bond, const std::vector<int>& spins) const {
-    const auto& bond_obj = bonds_[bond];
-    int site1 = bond_obj.site1;
-    int site2 = bond_obj.site2;
+void Hamiltonian::computeEnergyOffsets() {
+    energy_offsets_.resize(bond_matrices_.size());
     
-    // For most models, find the corresponding term
-    for (const auto& term : terms_) {
-        if (term.sites.size() == 2 && 
-            ((term.sites[0] == site1 && term.sites[1] == site2) ||
-             (term.sites[0] == site2 && term.sites[1] == site1))) {
-            if (term.is_diagonal) {
-                return evaluate_term_diagonal(term, spins);
+    for (size_t t = 0; t < bond_matrices_.size(); ++t) {
+        // Find minimum diagonal element
+        // We need all weights to be non-negative: w = -H + offset >= 0
+        // So offset >= max(H_diagonal)
+        Real max_diag = bond_matrices_[t](0, 0);
+        for (int i = 1; i < 4; ++i) {
+            max_diag = std::max(max_diag, bond_matrices_[t](i, i));
+        }
+        // Add small positive value to ensure strict positivity
+        energy_offsets_[t] = max_diag + 0.25;
+    }
+}
+
+Hamiltonian Hamiltonian::heisenberg(Real J) {
+    // H = J * (Sx·Sx + Sy·Sy + Sz·Sz)
+    // = J * (1/2 * (S+·S- + S-·S+) + Sz·Sz)
+    // = J/2 * (S+·S- + S-·S+) + J * Sz·Sz
+    //
+    // In basis |00⟩, |01⟩, |10⟩, |11⟩:
+    // Sz·Sz gives 1/4 on |00⟩ and |11⟩, -1/4 on |01⟩ and |10⟩
+    // S+·S- flips |01⟩ ↔ |10⟩
+    
+    BondMatrix H = BondMatrix::Zero();
+    
+    // Diagonal: Sz_i * Sz_j
+    // |00⟩: (+1/2)(+1/2) = 1/4  [both down, but convention: 0=up here? Let's use 0=down]
+    // Actually, let's be consistent: |0⟩ = |↓⟩, |1⟩ = |↑⟩
+    // Sz|0⟩ = -1/2|0⟩, Sz|1⟩ = +1/2|1⟩
+    // 
+    // |00⟩ -> index 0: Sz_i*Sz_j = (-1/2)(-1/2) = 1/4
+    // |01⟩ -> index 1: Sz_i*Sz_j = (-1/2)(+1/2) = -1/4
+    // |10⟩ -> index 2: Sz_i*Sz_j = (+1/2)(-1/2) = -1/4  
+    // |11⟩ -> index 3: Sz_i*Sz_j = (+1/2)(+1/2) = 1/4
+    
+    H(0, 0) = J * 0.25;   // |↓↓⟩
+    H(1, 1) = -J * 0.25;  // |↓↑⟩
+    H(2, 2) = -J * 0.25;  // |↑↓⟩
+    H(3, 3) = J * 0.25;   // |↑↑⟩
+    
+    // Off-diagonal: (S+_i S-_j + S-_i S+_j)/2
+    // S+|0⟩ = |1⟩, S+|1⟩ = 0
+    // S-|0⟩ = 0, S-|1⟩ = |0⟩
+    // 
+    // S+_i S-_j |01⟩ = S+_i|0⟩ ⊗ S-_j|1⟩ = |1⟩ ⊗ |0⟩ = |10⟩
+    // S-_i S+_j |10⟩ = S-_i|1⟩ ⊗ S+_j|0⟩ = |0⟩ ⊗ |1⟩ = |01⟩
+    
+    H(1, 2) = J * 0.5;  // |↓↑⟩ ↔ |↑↓⟩
+    H(2, 1) = J * 0.5;
+    
+    return Hamiltonian(H);
+}
+
+Hamiltonian Hamiltonian::xxz(Real Jxy, Real Jz) {
+    BondMatrix H = BondMatrix::Zero();
+    
+    // Diagonal: Jz * Sz·Sz
+    H(0, 0) = Jz * 0.25;
+    H(1, 1) = -Jz * 0.25;
+    H(2, 2) = -Jz * 0.25;
+    H(3, 3) = Jz * 0.25;
+    
+    // Off-diagonal: Jxy/2 * (S+S- + S-S+)
+    H(1, 2) = Jxy * 0.5;
+    H(2, 1) = Jxy * 0.5;
+    
+    return Hamiltonian(H);
+}
+
+Hamiltonian Hamiltonian::xy(Real J) {
+    return xxz(J, 0.0);
+}
+
+Hamiltonian Hamiltonian::ising(Real J) {
+    return xxz(0.0, J);
+}
+
+Hamiltonian Hamiltonian::xxzWithField(Real Jxy, Real Jz, Real h) {
+    BondMatrix H = BondMatrix::Zero();
+    
+    // Heisenberg part
+    H(0, 0) = Jz * 0.25;
+    H(1, 1) = -Jz * 0.25;
+    H(2, 2) = -Jz * 0.25;
+    H(3, 3) = Jz * 0.25;
+    
+    H(1, 2) = Jxy * 0.5;
+    H(2, 1) = Jxy * 0.5;
+    
+    // Field: -h*(Sz_i + Sz_j) (distributed evenly to bonds)
+    // For bond, add -h/z * (Sz_i + Sz_j) where z is coordination
+    // Here we add full field, user should scale if needed
+    // |00⟩: -h*(-1/2 - 1/2) = h
+    // |01⟩: -h*(-1/2 + 1/2) = 0
+    // |10⟩: -h*(+1/2 - 1/2) = 0
+    // |11⟩: -h*(+1/2 + 1/2) = -h
+    H(0, 0) += h;
+    H(3, 3) -= h;
+    
+    return Hamiltonian(H);
+}
+
+Hamiltonian Hamiltonian::xyz(Real Jx, Real Jy, Real Jz) {
+    BondMatrix H = BondMatrix::Zero();
+    
+    // Sx·Sx = 1/4 * (S+ + S-)(S+ + S-) = 1/4 * (S+S+ + S+S- + S-S+ + S-S-)
+    // Sy·Sy = -1/4 * (S+ - S-)(S+ - S-) = -1/4 * (S+S+ - S+S- - S-S+ + S-S-)
+    //
+    // Sx·Sx + Sy·Sy = 1/2 * (S+S- + S-S+)  [XY part]
+    // Sx·Sx - Sy·Sy = 1/2 * (S+S+ + S-S-)  [creates pairs]
+    //
+    // For Sx·Sx:
+    // |00⟩↔|11⟩: 1/4
+    // |01⟩↔|10⟩: 1/4
+    //
+    // For real SSE, we need real Hamiltonian. Standard XYZ:
+    // H = Jx*Sx·Sx + Jy*Sy·Sy + Jz*Sz·Sz
+    //   = (Jx+Jy)/4 * (S+S- + S-S+) + (Jx-Jy)/4 * (S+S+ + S-S-) + Jz*Sz·Sz
+    
+    // This creates sign problem unless Jx == Jy
+    // We proceed with the general case
+    
+    Real Jpm = (Jx + Jy) / 4.0;  // S+S- + S-S+ coefficient
+    Real Jpp = (Jx - Jy) / 4.0;  // S+S+ + S-S- coefficient
+    
+    // Diagonal: Jz * Sz·Sz
+    H(0, 0) = Jz * 0.25;
+    H(1, 1) = -Jz * 0.25;
+    H(2, 2) = -Jz * 0.25;
+    H(3, 3) = Jz * 0.25;
+    
+    // Off-diagonal from S+S- + S-S+
+    H(1, 2) = Jpm;
+    H(2, 1) = Jpm;
+    
+    // Off-diagonal from S+S+ + S-S- (pair creation/annihilation)
+    H(0, 3) = Jpp;
+    H(3, 0) = Jpp;
+    
+    return Hamiltonian(H);
+}
+
+Hamiltonian Hamiltonian::custom(const BondMatrix& matrix) {
+    return Hamiltonian(matrix);
+}
+
+Hamiltonian Hamiltonian::heisenbergDM(Real J, Real Dx, Real Dy, Real Dz) {
+    // H = J*S·S + D·(S×S)
+    // DM term: D·(Si × Sj) = Dx(Sy_i Sz_j - Sz_i Sy_j) + cyclic
+    // This is imaginary/antisymmetric, causes sign problem
+    // We implement real part only
+    
+    BondMatrix H = heisenberg(J).getBondMatrix(0);
+    
+    // For real DM interaction with D along z:
+    // Dz*(Sx_i Sy_j - Sy_i Sx_j) = i*Dz/2 * (S+_i S-_j - S-_i S+_j)
+    // This is purely imaginary, so in real representation it's zero
+    // 
+    // DM interaction generally creates sign problem.
+    // For now, return just Heisenberg as placeholder.
+    (void)Dx; (void)Dy; (void)Dz;
+    
+    return Hamiltonian(H);
+}
+
+const BondMatrix& Hamiltonian::getBondMatrix(int bond_type) const {
+    if (bond_type < 0 || bond_type >= static_cast<int>(bond_matrices_.size())) {
+        throw std::runtime_error(fmt::format(
+            "Invalid bond type {}, have {} types", bond_type, bond_matrices_.size()));
+    }
+    return bond_matrices_[bond_type];
+}
+
+Real Hamiltonian::matrixElement(VertexState in_state, VertexState out_state, int bond_type) const {
+    // in_state encodes (s_i_in, s_j_in) in lower 2 bits
+    // out_state encodes (s_i_out, s_j_out) in lower 2 bits
+    // But vertex state has all 4 bits
+    
+    int in_idx = in_state & 0x3;   // (s_i_in, s_j_in)
+    int out_idx = (out_state >> 2) & 0x3;  // (s_i_out, s_j_out)
+    
+    return bond_matrices_[bond_type](out_idx, in_idx);
+}
+
+bool Hamiltonian::isAllowedTransition(VertexState in_state, VertexState out_state, int bond_type) const {
+    return std::abs(matrixElement(in_state, out_state, bond_type)) > TOLERANCE;
+}
+
+Real Hamiltonian::getEnergyOffset(int bond_type) const {
+    if (bond_type < 0 || bond_type >= static_cast<int>(energy_offsets_.size())) {
+        return 0.0;
+    }
+    return energy_offsets_[bond_type];
+}
+
+void Hamiltonian::print() const {
+    std::cout << fmt::format("Hamiltonian with {} bond type(s)\n", bond_matrices_.size());
+    
+    for (size_t t = 0; t < bond_matrices_.size(); ++t) {
+        std::cout << fmt::format("\nBond type {}:\n", t);
+        for (int i = 0; i < 4; ++i) {
+            std::cout << "  [";
+            for (int j = 0; j < 4; ++j) {
+                std::cout << fmt::format("{:8.4f}", bond_matrices_[t](i, j));
+                if (j < 3) std::cout << ", ";
             }
+            std::cout << "]\n";
         }
-    }
-    return 0.0;
-}
-
-double Hamiltonian::offdiagonal_matrix_element(int bond, const std::vector<int>& /* spins */) const {
-    const auto& bond_obj = bonds_[bond];
-    // For most models, the off-diagonal matrix element is the coupling strength
-    return std::abs(bond_obj.coupling);
-}
-
-bool Hamiltonian::can_apply_offdiagonal(int bond, const std::vector<int>& spins) const {
-    const auto& bond_obj = bonds_[bond];
-    int site1 = bond_obj.site1;
-    int site2 = bond_obj.site2;
-    
-    // For spin-1/2 systems, can flip if spins are opposite
-    return spins[site1] != spins[site2];
-}
-
-void Hamiltonian::apply_offdiagonal(int bond, std::vector<int>& spins) const {
-    if (!can_apply_offdiagonal(bond, spins)) return;
-    
-    const auto& bond_obj = bonds_[bond];
-    int site1 = bond_obj.site1;
-    int site2 = bond_obj.site2;
-    
-    // Flip both spins
-    spins[site1] = 1 - spins[site1];
-    spins[site2] = 1 - spins[site2];
-}
-
-double Hamiltonian::get_diagonal_weight(int bond, const std::vector<int>& spins) const {
-    return std::abs(diagonal_matrix_element(bond, spins));
-}
-
-double Hamiltonian::get_offdiagonal_probability(int /* bond */) const {
-    // Simple probability based on coupling strength
-    return 0.5;  // For many models, this is a reasonable default
-}
-
-void Hamiltonian::calculate_diagonal_weights() {
-    total_diagonal_weight_ = 0.0;
-    
-    // Calculate maximum possible diagonal weight
-    for (const auto& bond : bonds_) {
-        total_diagonal_weight_ += std::abs(bond.coupling);
+        std::cout << fmt::format("  Energy offset: {:.4f}\n", energy_offsets_[t]);
     }
 }
 
-double Hamiltonian::evaluate_term_diagonal(const HamiltonianTerm& term, const std::vector<int>& spins) const {
-    if (term.sites.size() == 2) {
-        int s1 = spins[term.sites[0]];
-        int s2 = spins[term.sites[1]];
-        
-        // Convert to spin values: 0 -> -1/2, 1 -> +1/2
-        double sz1 = (s1 == 0) ? -0.5 : 0.5;
-        double sz2 = (s2 == 0) ? -0.5 : 0.5;
-        
-        // Evaluate different operator types
-        double result = 0.0;
-        for (size_t i = 0; i < term.operators.size(); ++i) {
-            if (term.operators[i] == "Sz") {
-                result += (i == 0 ? sz1 : sz2);
-            } else if (term.operators[i] == "SzSz") {
-                result = sz1 * sz2;
-                break;
-            }
-        }
-        
-        return term.coefficient * result;
-    }
-    
-    return 0.0;
-}
-
-bool Hamiltonian::can_apply_term_offdiagonal(const HamiltonianTerm& term, const std::vector<int>& spins) const {
-    if (term.is_diagonal) return false;
-    
-    // For S+ and S- operators
-    for (size_t i = 0; i < term.operators.size(); ++i) {
-        if (term.operators[i] == "S+" && spins[term.sites[i]] == 1) return false;  // Can't raise up spin
-        if (term.operators[i] == "S-" && spins[term.sites[i]] == 0) return false;  // Can't lower down spin
-    }
-    
-    return true;
-}
-
-void Hamiltonian::apply_term_offdiagonal(const HamiltonianTerm& term, std::vector<int>& spins) const {
-    if (!can_apply_term_offdiagonal(term, spins)) return;
-    
-    for (size_t i = 0; i < term.operators.size(); ++i) {
-        if (term.operators[i] == "S+") {
-            spins[term.sites[i]] = 1;  // Flip up
-        } else if (term.operators[i] == "S-") {
-            spins[term.sites[i]] = 0;  // Flip down
-        } else if (term.operators[i] == "Sx") {
-            spins[term.sites[i]] = 1 - spins[term.sites[i]];  // Flip
-        }
-    }
-}
-
-void Hamiltonian::print_info() const {
-    std::cout << "Hamiltonian Information:" << std::endl;
-    std::cout << "  Name: " << get_name() << std::endl;
-    std::cout << "  Number of terms: " << terms_.size() << std::endl;
-    std::cout << "  Number of bonds: " << bonds_.size() << std::endl;
-    std::cout << "  Total diagonal weight: " << total_diagonal_weight_ << std::endl;
-}
-
-// Heisenberg Model implementation
-HeisenbergModel::HeisenbergModel(std::shared_ptr<Lattice> lattice, double J) 
-    : Hamiltonian(lattice), J_(J) {
-    construct_hamiltonian();
-}
-
-void HeisenbergModel::construct_hamiltonian() {
-    terms_.clear();
-    
-    // H = J Σ_⟨i,j⟩ (S^x_i S^x_j + S^y_i S^y_j + S^z_i S^z_j)
-    //   = J Σ_⟨i,j⟩ (1/2(S^+_i S^-_j + S^-_i S^+_j) + S^z_i S^z_j)
-    
-    for (const auto& bond : bonds_) {
-        // Diagonal term: J S^z_i S^z_j
-        add_term({bond.site1, bond.site2}, {"Sz", "Sz"}, J_);
-        
-        // Off-diagonal terms: J/2 (S^+_i S^-_j + S^-_i S^+_j)
-        add_term({bond.site1, bond.site2}, {"S+", "S-"}, J_ / 2.0);
-        add_term({bond.site1, bond.site2}, {"S-", "S+"}, J_ / 2.0);
-    }
-    
-    calculate_diagonal_weights();
-}
-
-// Ising Model implementation
-IsingModel::IsingModel(std::shared_ptr<Lattice> lattice, double J) 
-    : Hamiltonian(lattice), J_(J) {
-    construct_hamiltonian();
-}
-
-void IsingModel::construct_hamiltonian() {
-    terms_.clear();
-    
-    // H = J Σ_⟨i,j⟩ S^z_i S^z_j
-    for (const auto& bond : bonds_) {
-        add_term({bond.site1, bond.site2}, {"Sz", "Sz"}, J_);
-    }
-    
-    calculate_diagonal_weights();
-}
-
-// XY Model implementation
-XYModel::XYModel(std::shared_ptr<Lattice> lattice, double J) 
-    : Hamiltonian(lattice), J_(J) {
-    construct_hamiltonian();
-}
-
-void XYModel::construct_hamiltonian() {
-    terms_.clear();
-    
-    // H = J Σ_⟨i,j⟩ (S^x_i S^x_j + S^y_i S^y_j)
-    //   = J Σ_⟨i,j⟩ 1/2(S^+_i S^-_j + S^-_i S^+_j)
-    
-    for (const auto& bond : bonds_) {
-        add_term({bond.site1, bond.site2}, {"S+", "S-"}, J_ / 2.0);
-        add_term({bond.site1, bond.site2}, {"S-", "S+"}, J_ / 2.0);
-    }
-    
-    calculate_diagonal_weights();
-}
-
-// XXZ Model implementation
-XXZModel::XXZModel(std::shared_ptr<Lattice> lattice, double J, double Delta) 
-    : Hamiltonian(lattice), J_(J), Delta_(Delta) {
-    construct_hamiltonian();
-}
-
-void XXZModel::construct_hamiltonian() {
-    terms_.clear();
-    
-    // H = J Σ_⟨i,j⟩ (S^x_i S^x_j + S^y_i S^y_j + Δ S^z_i S^z_j)
-    
-    for (const auto& bond : bonds_) {
-        // Diagonal term: J Δ S^z_i S^z_j
-        add_term({bond.site1, bond.site2}, {"Sz", "Sz"}, J_ * Delta_);
-        
-        // Off-diagonal terms: J/2 (S^+_i S^-_j + S^-_i S^+_j)
-        add_term({bond.site1, bond.site2}, {"S+", "S-"}, J_ / 2.0);
-        add_term({bond.site1, bond.site2}, {"S-", "S+"}, J_ / 2.0);
-    }
-    
-    calculate_diagonal_weights();
-}
-
-// Heisenberg with Field implementation
-HeisenbergField::HeisenbergField(std::shared_ptr<Lattice> lattice, double J, double h) 
-    : Hamiltonian(lattice), J_(J), h_(h) {
-    construct_hamiltonian();
-}
-
-void HeisenbergField::construct_hamiltonian() {
-    terms_.clear();
-    
-    // H = J Σ_⟨i,j⟩ S_i·S_j - h Σ_i S^z_i
-    
-    // Exchange terms
-    for (const auto& bond : bonds_) {
-        add_term({bond.site1, bond.site2}, {"Sz", "Sz"}, J_);
-        add_term({bond.site1, bond.site2}, {"S+", "S-"}, J_ / 2.0);
-        add_term({bond.site1, bond.site2}, {"S-", "S+"}, J_ / 2.0);
-    }
-    
-    // Magnetic field terms
-    for (int i = 0; i < lattice_->size(); ++i) {
-        add_term({i}, {"Sz"}, -h_);
-    }
-    
-    calculate_diagonal_weights();
-}
-
-} // namespace SSE
+} // namespace sse

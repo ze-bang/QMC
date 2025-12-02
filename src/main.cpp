@@ -1,262 +1,334 @@
+/**
+ * @file main.cpp
+ * @brief Main executable for SSE QMC simulation
+ * 
+ * Usage:
+ *   sse_qmc [options] config.json
+ *   sse_qmc --lattice <type> --L <size> --beta <beta> [options]
+ * 
+ * Examples:
+ *   sse_qmc --lattice square --L 8 --beta 1.0 --model heisenberg
+ *   sse_qmc -c config.json
+ */
+
 #include <iostream>
-#include <memory>
-#include <string>
 #include <fstream>
-#include <chrono>
-#include <iomanip>
-#include "sse_qmc.h"
-#include "lattice.h"
-#include "hamiltonian.h"
+#include <string>
+#include <cstdlib>
+#include <nlohmann/json.hpp>
+#include <fmt/format.h>
+#include <mpi.h>
+#include "sse.hpp"
 
-using namespace SSE;
+using namespace sse;
+using json = nlohmann::json;
 
-void print_usage(const char* program_name) {
-    std::cout << "Usage: " << program_name << " [options]\n"
-              << "Options:\n"
-              << "  --lattice <type>     Lattice type: square, triangular, chain, honeycomb\n"
-              << "  --model <type>       Model type: heisenberg, ising, xy, xxz\n"
-              << "  --Lx <size>          Lattice size in x direction\n"
-              << "  --Ly <size>          Lattice size in y direction (for 2D lattices)\n"
-              << "  --periodic           Use periodic boundary conditions\n"
-              << "  --J <coupling>       Exchange coupling strength\n"
-              << "  --Delta <anisotropy> Anisotropy parameter (for XXZ model)\n"
-              << "  --h <field>          Magnetic field strength\n"
-              << "  --beta <temp>        Inverse temperature\n"
-              << "  --therm <steps>      Thermalization steps\n"
-              << "  --meas <steps>       Measurement steps\n"
-              << "  --interval <int>     Measurement interval\n"
-              << "  --seed <seed>        Random seed\n"
-              << "  --output <file>      Output file prefix\n"
-              << "  --help               Show this help message\n"
-              << std::endl;
+void printUsage(const char* prog) {
+    std::cout << "SSE Quantum Monte Carlo for Spin-1/2 Systems\n\n";
+    std::cout << "Usage:\n";
+    std::cout << "  " << prog << " [options]\n\n";
+    std::cout << "Options:\n";
+    std::cout << "  -c, --config <file>     Load configuration from JSON file\n";
+    std::cout << "  --lattice <type>        Lattice type: chain, square, triangular, honeycomb, kagome, cubic\n";
+    std::cout << "  --L <size>              Linear system size\n";
+    std::cout << "  --Lx, --Ly, --Lz <size> System size in each dimension\n";
+    std::cout << "  --beta <value>          Inverse temperature\n";
+    std::cout << "  --model <type>          Model: heisenberg, xxz, xy, ising\n";
+    std::cout << "  --J <value>             Exchange coupling (default: 1.0)\n";
+    std::cout << "  --Jz <value>            Z-coupling for XXZ (default: J)\n";
+    std::cout << "  --h <value>             Magnetic field (default: 0.0)\n";
+    std::cout << "  --therm <sweeps>        Thermalization sweeps (default: 10000)\n";
+    std::cout << "  --sweeps <sweeps>       Measurement sweeps (default: 100000)\n";
+    std::cout << "  --bins <n>              Number of bins (default: 100)\n";
+    std::cout << "  --seed <value>          Random seed (default: 42)\n";
+    std::cout << "  --output <file>         Output file for results\n";
+    std::cout << "  -v, --verbose           Verbose output\n";
+    std::cout << "  -h, --help              Show this help message\n";
 }
 
-struct Parameters {
+struct ProgramOptions {
+    std::string config_file;
     std::string lattice_type = "square";
+    int L = 0;
+    int Lx = 0, Ly = 0, Lz = 0;
+    Real beta = 1.0;
     std::string model_type = "heisenberg";
-    int Lx = 8;
-    int Ly = 8;
-    bool periodic = true;
-    double J = 1.0;
-    double Delta = 1.0;
-    double h = 0.0;
-    double beta = 10.0;
-    long long therm_steps = 10000;
-    long long meas_steps = 50000;
-    int meas_interval = 1;
-    unsigned int seed = 42;
-    std::string output_prefix = "sse_qmc";
+    Real J = 1.0;
+    Real Jz = 1.0;
+    Real h = 0.0;
+    int n_therm = 10000;
+    int n_sweeps = 100000;
+    int n_bins = 100;
+    uint64_t seed = 42;
+    std::string output_file;
+    bool verbose = false;
+    bool use_mpi = false;
 };
 
-void parse_arguments(int argc, char* argv[], Parameters& params) {
+ProgramOptions parseArgs(int argc, char* argv[]) {
+    ProgramOptions opts;
+    
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         
-        if (arg == "--help") {
-            print_usage(argv[0]);
-            exit(0);
-        } else if (arg == "--lattice" && i + 1 < argc) {
-            params.lattice_type = argv[++i];
-        } else if (arg == "--model" && i + 1 < argc) {
-            params.model_type = argv[++i];
-        } else if (arg == "--Lx" && i + 1 < argc) {
-            params.Lx = std::stoi(argv[++i]);
-        } else if (arg == "--Ly" && i + 1 < argc) {
-            params.Ly = std::stoi(argv[++i]);
-        } else if (arg == "--periodic") {
-            params.periodic = true;
-        } else if (arg == "--open") {
-            params.periodic = false;
-        } else if (arg == "--J" && i + 1 < argc) {
-            params.J = std::stod(argv[++i]);
-        } else if (arg == "--Delta" && i + 1 < argc) {
-            params.Delta = std::stod(argv[++i]);
-        } else if (arg == "--h" && i + 1 < argc) {
-            params.h = std::stod(argv[++i]);
-        } else if (arg == "--beta" && i + 1 < argc) {
-            params.beta = std::stod(argv[++i]);
-        } else if (arg == "--therm" && i + 1 < argc) {
-            params.therm_steps = std::stoll(argv[++i]);
-        } else if (arg == "--meas" && i + 1 < argc) {
-            params.meas_steps = std::stoll(argv[++i]);
-        } else if (arg == "--interval" && i + 1 < argc) {
-            params.meas_interval = std::stoi(argv[++i]);
-        } else if (arg == "--seed" && i + 1 < argc) {
-            params.seed = static_cast<unsigned int>(std::stoul(argv[++i]));
-        } else if (arg == "--output" && i + 1 < argc) {
-            params.output_prefix = argv[++i];
+        if (arg == "-h" || arg == "--help") {
+            printUsage(argv[0]);
+            std::exit(0);
+        } else if (arg == "-c" || arg == "--config") {
+            opts.config_file = argv[++i];
+        } else if (arg == "--lattice") {
+            opts.lattice_type = argv[++i];
+        } else if (arg == "--L") {
+            opts.L = std::stoi(argv[++i]);
+        } else if (arg == "--Lx") {
+            opts.Lx = std::stoi(argv[++i]);
+        } else if (arg == "--Ly") {
+            opts.Ly = std::stoi(argv[++i]);
+        } else if (arg == "--Lz") {
+            opts.Lz = std::stoi(argv[++i]);
+        } else if (arg == "--beta") {
+            opts.beta = std::stod(argv[++i]);
+        } else if (arg == "--model") {
+            opts.model_type = argv[++i];
+        } else if (arg == "--J") {
+            opts.J = std::stod(argv[++i]);
+        } else if (arg == "--Jz") {
+            opts.Jz = std::stod(argv[++i]);
+        } else if (arg == "--h") {
+            opts.h = std::stod(argv[++i]);
+        } else if (arg == "--therm") {
+            opts.n_therm = std::stoi(argv[++i]);
+        } else if (arg == "--sweeps") {
+            opts.n_sweeps = std::stoi(argv[++i]);
+        } else if (arg == "--bins") {
+            opts.n_bins = std::stoi(argv[++i]);
+        } else if (arg == "--seed") {
+            opts.seed = std::stoull(argv[++i]);
+        } else if (arg == "--output") {
+            opts.output_file = argv[++i];
+        } else if (arg == "-v" || arg == "--verbose") {
+            opts.verbose = true;
+        } else if (arg == "--mpi") {
+            opts.use_mpi = true;
         } else {
-            std::cerr << "Unknown argument: " << arg << std::endl;
-            print_usage(argv[0]);
-            exit(1);
+            std::cerr << "Unknown option: " << arg << "\n";
+            printUsage(argv[0]);
+            std::exit(1);
         }
     }
+    
+    return opts;
 }
 
-std::unique_ptr<Lattice> create_lattice(const Parameters& params) {
-    if (params.lattice_type == "square") {
-        return std::make_unique<SquareLattice>(params.Lx, params.Ly, params.periodic);
-    } else if (params.lattice_type == "triangular") {
-        return std::make_unique<TriangularLattice>(params.Lx, params.Ly, params.periodic);
-    } else if (params.lattice_type == "chain") {
-        return std::make_unique<Chain>(params.Lx, params.periodic);
-    } else if (params.lattice_type == "honeycomb") {
-        return std::make_unique<HoneycombLattice>(params.Lx, params.Ly, params.periodic);
+ProgramOptions loadConfigFromJson(const std::string& filename) {
+    ProgramOptions opts;
+    
+    std::ifstream file(filename);
+    if (!file) {
+        throw std::runtime_error("Cannot open config file: " + filename);
+    }
+    
+    json j;
+    file >> j;
+    
+    if (j.contains("lattice")) {
+        auto& lat = j["lattice"];
+        opts.lattice_type = lat.value("type", "square");
+        opts.L = lat.value("L", 0);
+        opts.Lx = lat.value("Lx", 0);
+        opts.Ly = lat.value("Ly", 0);
+        opts.Lz = lat.value("Lz", 0);
+    }
+    
+    if (j.contains("model")) {
+        auto& model = j["model"];
+        opts.model_type = model.value("type", "heisenberg");
+        opts.J = model.value("J", 1.0);
+        opts.Jz = model.value("Jz", opts.J);
+        opts.h = model.value("h", 0.0);
+    }
+    
+    if (j.contains("simulation")) {
+        auto& sim = j["simulation"];
+        opts.beta = sim.value("beta", 1.0);
+        opts.n_therm = sim.value("thermalization", 10000);
+        opts.n_sweeps = sim.value("sweeps", 100000);
+        opts.n_bins = sim.value("bins", 100);
+        opts.seed = sim.value("seed", 42);
+    }
+    
+    opts.output_file = j.value("output", "");
+    opts.verbose = j.value("verbose", false);
+    
+    return opts;
+}
+
+Lattice createLattice(const ProgramOptions& opts) {
+    int Lx = opts.Lx > 0 ? opts.Lx : opts.L;
+    int Ly = opts.Ly > 0 ? opts.Ly : opts.L;
+    int Lz = opts.Lz > 0 ? opts.Lz : opts.L;
+    
+    if (Lx <= 0) {
+        throw std::runtime_error("Invalid lattice size");
+    }
+    
+    if (opts.lattice_type == "chain") {
+        return Lattice::chain(Lx);
+    } else if (opts.lattice_type == "square") {
+        return Lattice::square(Lx, Ly > 0 ? Ly : Lx);
+    } else if (opts.lattice_type == "triangular") {
+        return Lattice::triangular(Lx, Ly > 0 ? Ly : Lx);
+    } else if (opts.lattice_type == "honeycomb") {
+        return Lattice::honeycomb(Lx, Ly > 0 ? Ly : Lx);
+    } else if (opts.lattice_type == "kagome") {
+        return Lattice::kagome(Lx, Ly > 0 ? Ly : Lx);
+    } else if (opts.lattice_type == "cubic") {
+        return Lattice::cubic(Lx, Ly > 0 ? Ly : Lx, Lz > 0 ? Lz : Lx);
     } else {
-        throw std::invalid_argument("Unknown lattice type: " + params.lattice_type);
+        throw std::runtime_error("Unknown lattice type: " + opts.lattice_type);
     }
 }
 
-std::unique_ptr<Hamiltonian> create_hamiltonian(std::shared_ptr<Lattice> lattice, const Parameters& params) {
-    if (params.model_type == "heisenberg") {
-        if (params.h != 0.0) {
-            return std::make_unique<HeisenbergField>(lattice, params.J, params.h);
-        } else {
-            return std::make_unique<HeisenbergModel>(lattice, params.J);
+Hamiltonian createHamiltonian(const ProgramOptions& opts) {
+    if (opts.model_type == "heisenberg") {
+        if (opts.h != 0.0) {
+            return Hamiltonian::xxzWithField(opts.J, opts.J, opts.h);
         }
-    } else if (params.model_type == "ising") {
-        return std::make_unique<IsingModel>(lattice, params.J);
-    } else if (params.model_type == "xy") {
-        return std::make_unique<XYModel>(lattice, params.J);
-    } else if (params.model_type == "xxz") {
-        return std::make_unique<XXZModel>(lattice, params.J, params.Delta);
+        return Hamiltonian::heisenberg(opts.J);
+    } else if (opts.model_type == "xxz") {
+        if (opts.h != 0.0) {
+            return Hamiltonian::xxzWithField(opts.J, opts.Jz, opts.h);
+        }
+        return Hamiltonian::xxz(opts.J, opts.Jz);
+    } else if (opts.model_type == "xy") {
+        return Hamiltonian::xy(opts.J);
+    } else if (opts.model_type == "ising") {
+        return Hamiltonian::ising(opts.J);
     } else {
-        throw std::invalid_argument("Unknown model type: " + params.model_type);
+        throw std::runtime_error("Unknown model type: " + opts.model_type);
     }
 }
 
-void save_parameters(const Parameters& params, const std::string& filename) {
+void saveResults(const std::string& filename, 
+                 const ProgramOptions& opts,
+                 const Measurements& measurements,
+                 const SSESimulation& sim) {
+    json j;
+    
+    // Input parameters
+    j["parameters"]["lattice"] = opts.lattice_type;
+    j["parameters"]["L"] = opts.L > 0 ? opts.L : opts.Lx;
+    j["parameters"]["beta"] = opts.beta;
+    j["parameters"]["model"] = opts.model_type;
+    j["parameters"]["J"] = opts.J;
+    j["parameters"]["Jz"] = opts.Jz;
+    j["parameters"]["h"] = opts.h;
+    j["parameters"]["sweeps"] = opts.n_sweeps;
+    j["parameters"]["thermalization"] = opts.n_therm;
+    
+    // Results
+    auto results = measurements.getResults();
+    for (const auto& [name, val] : results) {
+        j["results"][name]["mean"] = val.first;
+        j["results"][name]["error"] = val.second;
+    }
+    
+    // Statistics
+    j["statistics"]["sweeps"] = sim.numSweeps();
+    j["statistics"]["acceptance_rate"] = sim.acceptanceRate();
+    
     std::ofstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Warning: Could not save parameters to " << filename << std::endl;
-        return;
-    }
-    
-    file << "# SSE QMC Parameters\n";
-    file << "lattice_type: " << params.lattice_type << "\n";
-    file << "model_type: " << params.model_type << "\n";
-    file << "Lx: " << params.Lx << "\n";
-    file << "Ly: " << params.Ly << "\n";
-    file << "periodic: " << (params.periodic ? "true" : "false") << "\n";
-    file << "J: " << params.J << "\n";
-    file << "Delta: " << params.Delta << "\n";
-    file << "h: " << params.h << "\n";
-    file << "beta: " << params.beta << "\n";
-    file << "therm_steps: " << params.therm_steps << "\n";
-    file << "meas_steps: " << params.meas_steps << "\n";
-    file << "meas_interval: " << params.meas_interval << "\n";
-    file << "seed: " << params.seed << "\n";
-    
-    file.close();
+    file << j.dump(2);
 }
 
 int main(int argc, char* argv[]) {
-    std::cout << "=== SSE Quantum Monte Carlo ===" << std::endl;
-    std::cout << "Stochastic Series Expansion for Spin-1/2 Systems" << std::endl;
-    std::cout << std::string(50, '=') << std::endl;
-    
-    // Parse command line arguments
-    Parameters params;
-    parse_arguments(argc, argv, params);
+    // Initialize MPI
+    int mpi_rank = 0, mpi_size = 1;
+    MPI_Init(&argc, &argv);
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
     
     try {
+        // Parse command line arguments
+        ProgramOptions opts = parseArgs(argc, argv);
+        
+        // Load config file if specified
+        if (!opts.config_file.empty()) {
+            opts = loadConfigFromJson(opts.config_file);
+        }
+        
+        // Validate options
+        if (opts.L <= 0 && opts.Lx <= 0) {
+            if (mpi_rank == 0) {
+                std::cerr << "Error: System size not specified\n";
+                printUsage(argv[0]);
+            }
+            MPI_Finalize();
+            return 1;
+        }
+        
         // Create lattice
-        auto lattice = create_lattice(params);
-        lattice->print_info();
+        Lattice lattice = createLattice(opts);
         
         // Create Hamiltonian
-        auto shared_lattice = std::shared_ptr<Lattice>(lattice.release());
-        auto hamiltonian = create_hamiltonian(shared_lattice, params);
-        hamiltonian->print_info();
+        Hamiltonian hamiltonian = createHamiltonian(opts);
         
-        // Create SSE QMC instance
-        auto qmc = std::make_unique<SSE_QMC>(
-            shared_lattice,
-            std::move(hamiltonian),
-            params.beta,
-            1000,  // Initial cutoff
-            params.seed
-        );
+        // Print info on rank 0
+        if (mpi_rank == 0 && opts.verbose) {
+            std::cout << "=== SSE QMC Simulation ===\n\n";
+            lattice.print();
+            std::cout << "\n";
+            hamiltonian.print();
+            std::cout << "\nSimulation parameters:\n";
+            std::cout << fmt::format("  β = {:.4f} (T = {:.4f})\n", opts.beta, 1.0/opts.beta);
+            std::cout << fmt::format("  Thermalization: {} sweeps\n", opts.n_therm);
+            std::cout << fmt::format("  Measurements: {} sweeps\n", opts.n_sweeps);
+            std::cout << fmt::format("  MPI processes: {}\n\n", mpi_size);
+        }
         
-        // Save parameters
-        save_parameters(params, params.output_prefix + "_params.txt");
+        // Set up simulation parameters
+        SimulationParams params;
+        params.beta = opts.beta;
+        params.n_therm = opts.n_therm;
+        params.n_sweeps = opts.n_sweeps / mpi_size;  // Divide work
+        params.n_bins = opts.n_bins;
+        params.seed = opts.seed + mpi_rank * 12345;  // Different seed per rank
         
-        // Run simulation
-        auto start_time = std::chrono::high_resolution_clock::now();
+        // Create and run simulation
+        SSESimulation sim(lattice, hamiltonian, params);
         
-        qmc->run_simulation(params.therm_steps, params.meas_steps, params.meas_interval);
+        if (mpi_rank == 0 && opts.verbose) {
+            std::cout << "Initializing...\n";
+        }
+        sim.initialize();
         
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+        if (mpi_rank == 0 && opts.verbose) {
+            std::cout << "Thermalizing...\n";
+        }
+        sim.thermalize();
         
-        std::cout << "\nSimulation completed in " << duration.count() << " seconds" << std::endl;
+        if (mpi_rank == 0 && opts.verbose) {
+            std::cout << "Running production...\n";
+        }
+        sim.run();
         
-    // Save results to disk
-    qmc->save_results(params.output_prefix);
+        // Collect results from all ranks (simplified - just rank 0 output)
+        if (mpi_rank == 0) {
+            sim.getMeasurements().print();
+            sim.printStatus();
+            
+            if (!opts.output_file.empty()) {
+                saveResults(opts.output_file, opts, sim.getMeasurements(), sim);
+                std::cout << "\nResults saved to: " << opts.output_file << "\n";
+            }
+        }
         
     } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << "\n";
+        MPI_Finalize();
         return 1;
     }
     
+    MPI_Finalize();
     return 0;
-}
-
-// Example function for running a temperature scan
-void run_temperature_scan() {
-    std::cout << "\n=== Temperature Scan Example ===" << std::endl;
-    
-    // Parameters
-    int Lx = 8, Ly = 8;
-    double J = 1.0;
-    std::vector<double> temperatures = {0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0};
-    
-    // Create lattice and Hamiltonian
-    auto lattice = std::make_unique<SquareLattice>(Lx, Ly, true);
-    auto shared_lattice = std::shared_ptr<Lattice>(lattice.release());
-    auto hamiltonian = std::make_unique<HeisenbergModel>(shared_lattice, J);
-    
-    std::cout << "Temperature\tEnergy\t\tSpecific_Heat\tSusceptibility" << std::endl;
-    std::cout << std::string(70, '-') << std::endl;
-    
-    for (double T : temperatures) {
-        double beta = 1.0 / T;
-        
-        auto qmc = std::make_unique<SSE_QMC>(
-            std::unique_ptr<Lattice>(shared_lattice.get()),
-            std::unique_ptr<Hamiltonian>(hamiltonian.get()),
-            beta,
-            1000,
-            42
-        );
-        
-        // Quick simulation for demo
-        qmc->run_simulation(5000, 10000, 10);
-        
-        std::cout << std::fixed << std::setprecision(3)
-                  << T << "\t\t"
-                  << qmc->get_energy() << "\t\t"
-                  << "N/A" << "\t\t"  // Would need to implement getter for specific heat
-                  << "N/A" << std::endl;  // Would need to implement getter for susceptibility
-    }
-    
-    // Prevent double delete
-    // shared_lattice.release();
-    // hamiltonian.release();
-}
-
-// Example for different lattice types
-void demonstrate_lattices() {
-    std::cout << "\n=== Lattice Types Demonstration ===" << std::endl;
-    
-    std::vector<std::unique_ptr<Lattice>> lattices;
-    lattices.push_back(std::make_unique<SquareLattice>(4, 4, true));
-    lattices.push_back(std::make_unique<TriangularLattice>(4, 4, true));
-    lattices.push_back(std::make_unique<Chain>(16, true));
-    lattices.push_back(std::make_unique<HoneycombLattice>(3, 3, true));
-    
-    for (auto& lattice : lattices) {
-        std::cout << "\n" << std::string(40, '-') << std::endl;
-        lattice->print_info();
-    }
 }
