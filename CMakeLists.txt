@@ -1,103 +1,117 @@
-cmake_minimum_required(VERSION 3.16)
-project(SSE_QMC VERSION 1.0.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.20)
+project(qmc_sse
+    VERSION 0.1.0
+    DESCRIPTION "Stochastic Series Expansion QMC for lattice spin systems"
+    LANGUAGES CXX
+)
+
+# -----------------------------------------------------------------------------
+# Build options
+# -----------------------------------------------------------------------------
+option(QMC_BUILD_TESTS       "Build unit / physics tests"      ON)
+option(QMC_BUILD_BENCHMARKS  "Build throughput benchmark"      ON)
+option(QMC_ENABLE_OPENMP     "Use OpenMP for replica parallelism"  ON)
+option(QMC_ENABLE_LTO        "Enable link-time optimization in Release" ON)
+option(QMC_ENABLE_NATIVE     "Tune for the host CPU (-march=native)"    ON)
+option(QMC_WERROR            "Treat warnings as errors"        OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Build type
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
+                 Debug Release RelWithDebInfo MinSizeRel)
 endif()
 
-# Compiler flags
-set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -Wpedantic -fsanitize=address,undefined")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG -ffast-math")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -march=native")
-
-# Find required packages
-find_package(Eigen3 3.3 REQUIRED NO_MODULE)
-find_package(OpenMP REQUIRED)
-find_package(MPI REQUIRED)
-
-# Optional: HDF5 for checkpointing
-find_package(HDF5 COMPONENTS CXX)
-
-# fmt library for formatting
-include(FetchContent)
-FetchContent_Declare(
-    fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-    GIT_TAG 10.1.1
+# -----------------------------------------------------------------------------
+# Header-only library target
+# -----------------------------------------------------------------------------
+add_library(qmc_sse_lib INTERFACE)
+target_include_directories(qmc_sse_lib INTERFACE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
-FetchContent_MakeAvailable(fmt)
+target_compile_features(qmc_sse_lib INTERFACE cxx_std_20)
 
-# json library for configuration
-FetchContent_Declare(
-    json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3
-)
-FetchContent_MakeAvailable(json)
-
-# PCG random number generator (high quality RNG)
-FetchContent_Declare(
-    pcg
-    GIT_REPOSITORY https://github.com/imneme/pcg-cpp.git
-    GIT_TAG v0.98.1
-)
-FetchContent_MakeAvailable(pcg)
-
-# Main library
-add_library(sse_qmc_lib STATIC
-    src/lattice.cpp
-    src/hamiltonian.cpp
-    src/vertex.cpp
-    src/sse_config.cpp
-    src/sse_simulation.cpp
-    src/measurements.cpp
-    src/random.cpp
-)
-
-target_include_directories(sse_qmc_lib PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${pcg_SOURCE_DIR}/include
-)
-
-target_link_libraries(sse_qmc_lib PUBLIC
-    Eigen3::Eigen
-    OpenMP::OpenMP_CXX
-    MPI::MPI_CXX
-    fmt::fmt
-    nlohmann_json::nlohmann_json
-)
-
-if(HDF5_FOUND)
-    target_compile_definitions(sse_qmc_lib PUBLIC USE_HDF5)
-    target_link_libraries(sse_qmc_lib PUBLIC ${HDF5_CXX_LIBRARIES})
-    target_include_directories(sse_qmc_lib PUBLIC ${HDF5_INCLUDE_DIRS})
+# Warning flags (gcc / clang / msvc).
+if(MSVC)
+    target_compile_options(qmc_sse_lib INTERFACE /W4 /permissive-)
+    if(QMC_WERROR)
+        target_compile_options(qmc_sse_lib INTERFACE /WX)
+    endif()
+else()
+    target_compile_options(qmc_sse_lib INTERFACE
+        -Wall -Wextra -Wpedantic -Wshadow -Wnon-virtual-dtor
+        -Wcast-align -Wunused -Woverloaded-virtual
+        -Wdouble-promotion -Wformat=2
+    )
+    if(QMC_WERROR)
+        target_compile_options(qmc_sse_lib INTERFACE -Werror)
+    endif()
+    if(QMC_ENABLE_NATIVE)
+        target_compile_options(qmc_sse_lib INTERFACE
+            $<$<CONFIG:Release,RelWithDebInfo>:-march=native>)
+    endif()
 endif()
 
-# Main executable
-add_executable(sse_qmc src/main.cpp)
-target_link_libraries(sse_qmc PRIVATE sse_qmc_lib)
+# OpenMP --------------------------------------------------------------------
+if(QMC_ENABLE_OPENMP)
+    find_package(OpenMP COMPONENTS CXX)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(qmc_sse_lib INTERFACE OpenMP::OpenMP_CXX)
+        message(STATUS "qmc_sse: OpenMP enabled (${OpenMP_CXX_VERSION})")
+    else()
+        message(STATUS "qmc_sse: OpenMP requested but not found, building serial")
+    endif()
+endif()
 
+# IPO / LTO -----------------------------------------------------------------
+if(QMC_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_err)
+    if(_ipo_ok)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    else()
+        message(STATUS "qmc_sse: LTO requested but not supported: ${_ipo_err}")
+    endif()
+endif()
+
+# -----------------------------------------------------------------------------
+# CLI driver
+# -----------------------------------------------------------------------------
+add_executable(qmc_sse apps/qmc_sse.cpp)
+target_link_libraries(qmc_sse PRIVATE qmc_sse_lib)
+
+# -----------------------------------------------------------------------------
 # Tests
-enable_testing()
-add_executable(test_sse
-    tests/test_lattice.cpp
-    tests/test_hamiltonian.cpp
-    tests/test_simulation.cpp
-    tests/test_main.cpp
-)
-target_link_libraries(test_sse PRIVATE sse_qmc_lib)
-add_test(NAME SSETests COMMAND test_sse)
+# -----------------------------------------------------------------------------
+if(QMC_BUILD_TESTS)
+    enable_testing()
+    file(GLOB QMC_TEST_SOURCES CONFIGURE_DEPENDS "tests/test_*.cpp")
+    add_executable(qmc_tests ${QMC_TEST_SOURCES})
+    target_link_libraries(qmc_tests PRIVATE qmc_sse_lib)
+    target_include_directories(qmc_tests PRIVATE tests)
+    add_test(NAME qmc_tests COMMAND qmc_tests)
+    set_tests_properties(qmc_tests PROPERTIES TIMEOUT 600)
+endif()
 
-# Benchmark executable
-add_executable(benchmark_sse benchmarks/benchmark.cpp)
-target_link_libraries(benchmark_sse PRIVATE sse_qmc_lib)
+# -----------------------------------------------------------------------------
+# Benchmarks
+# -----------------------------------------------------------------------------
+if(QMC_BUILD_BENCHMARKS)
+    add_executable(qmc_bench benchmarks/bench_sse.cpp)
+    target_link_libraries(qmc_bench PRIVATE qmc_sse_lib)
+endif()
 
-# Install
-install(TARGETS sse_qmc RUNTIME DESTINATION bin)
-install(TARGETS sse_qmc_lib ARCHIVE DESTINATION lib)
-install(DIRECTORY include/ DESTINATION include)
+# -----------------------------------------------------------------------------
+# Install / export
+# -----------------------------------------------------------------------------
+include(GNUInstallDirs)
+install(TARGETS qmc_sse RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+# Friendly final message.
+message(STATUS "qmc_sse configured: build=${CMAKE_BUILD_TYPE} "
+               "tests=${QMC_BUILD_TESTS} bench=${QMC_BUILD_BENCHMARKS}")

@@ -1,296 +1,150 @@
-# SSE Quantum Monte Carlo for Spin-1/2 Systems
+# qmc_sse
 
-A high-performance C++ implementation of the Stochastic Series Expansion (SSE) Quantum Monte Carlo algorithm for spin-1/2 systems with arbitrary lattice geometries and nearest-neighbor interaction Hamiltonians.
+A modern, header-only **Stochastic Series Expansion** (SSE) Quantum Monte
+Carlo library and command-line driver for spin-1/2 lattice systems.
+Implements Sandvik's operator-loop algorithm for the antiferromagnetic
+Heisenberg model on bipartite lattices. Designed to be small, fast,
+hackable, and dependency-free (no JSON / Boost / FetchContent — just a
+modern C++20 compiler and CMake).
+
+```
+                  H = J Σ_<ij> S_i · S_j      (J > 0, bipartite lattice)
+```
 
 ## Features
 
-- **Arbitrary Lattices**: Chain, square, triangular, honeycomb, kagome, cubic, and custom lattices
-- **General Hamiltonians**: Heisenberg, XXZ, XY, Ising, and custom 4×4 bond matrices
-- **Efficient Updates**: Diagonal updates and directed loop algorithm
-- **Measurements**: Energy, specific heat, magnetization, susceptibility, correlations
-- **High Performance**: 
-  - OpenMP parallelization
-  - MPI support for parallel tempering and distributed computing
-  - PCG random number generator for high-quality statistics
-  - Optimized data structures
-- **Extensible**: Easy to add new lattices, models, and measurements
+- **Algorithm** — Sandvik (1999) operator-loop SSE with adaptive operator
+  string truncation, free-spin flips, and the Marshall sign
+  transformation (sign-problem free on bipartite lattices).
+- **Lattices** — built-in 1D chain, 2D square, 2D honeycomb. Adding new
+  bipartite lattices = supplying a list of bonds.
+- **Observables** — energy, specific heat (jackknife), uniform / staggered
+  magnetization (m, m², m⁴), uniform / staggered static
+  susceptibilities, Binder cumulant.
+- **Statistics** — Flyvbjerg–Petersen logarithmic binning analysis,
+  jackknife errors for derived quantities, integrated autocorrelation
+  time estimates.
+- **Parallelism** — independent replicas in parallel via OpenMP; fast
+  PCG32 RNG seeded from a single user-controlled value for full
+  reproducibility per replica.
+- **Tooling** — CMake build, IPO/LTO, `-march=native`, strict warnings,
+  self-contained unit + physics test suite, and a throughput benchmark.
 
-## Requirements
-
-- C++20 compiler (GCC 10+, Clang 12+, or MSVC 2019+)
-- CMake 3.16+
-- Eigen3 (linear algebra)
-- OpenMP (parallelization)
-- MPI (distributed computing)
-- Optional: HDF5 (checkpointing)
-
-## Building
+## Build
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd QMC_cpp
-
-# Create build directory
-mkdir build && cd build
-
-# Configure with CMake
-cmake .. -DCMAKE_BUILD_TYPE=Release
-
-# Build
-cmake --build . -j$(nproc)
-
-# Run tests
-ctest --output-on-failure
-
-# Install (optional)
-sudo cmake --install .
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
 ```
 
-### Build Options
+The build has zero external dependencies. OpenMP is auto-detected and
+optional (turn off with `-DQMC_ENABLE_OPENMP=OFF`).
 
-- `CMAKE_BUILD_TYPE`: `Release` (optimized), `Debug` (with sanitizers), `RelWithDebInfo`
-- Custom compiler: `cmake .. -DCMAKE_CXX_COMPILER=g++-12`
-
-## Usage
-
-### Command Line
+## Run a simulation
 
 ```bash
-# Simple Heisenberg model on 8x8 square lattice at β=2
-./sse_qmc --lattice square --L 8 --beta 2.0 --model heisenberg
+# Use a config file …
+./build/qmc_sse examples/heisenberg_chain.conf
 
-# With output file
-./sse_qmc --lattice square --L 16 --beta 1.0 --sweeps 100000 --output results.json
-
-# From configuration file
-./sse_qmc -c examples/heisenberg_square.json
-
-# Using MPI for parallel runs
-mpirun -np 4 ./sse_qmc --lattice square --L 16 --beta 2.0
+# …or override individual settings on the command line
+./build/qmc_sse examples/heisenberg_square.conf beta=4.0 measurements=200000
 ```
 
-### Configuration File (JSON)
+Config syntax is `key = value` with `#` comments and optional `[section]`
+headers (sections are ignored — flat namespace). See
+[`examples/`](examples/) for ready-made runs.
 
-```json
-{
-    "lattice": {
-        "type": "square",
-        "Lx": 16,
-        "Ly": 16
-    },
-    "model": {
-        "type": "heisenberg",
-        "J": 1.0
-    },
-    "simulation": {
-        "beta": 2.0,
-        "thermalization": 10000,
-        "sweeps": 100000,
-        "bins": 100,
-        "seed": 42
-    },
-    "output": "results.json",
-    "verbose": true
-}
+### Important keys
+
+| key              | default              | meaning |
+|------------------|----------------------|---------|
+| `lattice`        | `chain`              | `chain` / `square` / `honeycomb` |
+| `Lx`, `Ly`       | `16`, `Lx`           | linear sizes (Ly ignored for chain) |
+| `J`              | `1.0`                | exchange (must be > 0) |
+| `beta`           | `4.0`                | inverse temperature |
+| `thermalization` | `5000`               | warm-up sweeps (with adaptive M) |
+| `measurements`   | `20000`              | measurement sweeps |
+| `measure_every`  | `1`                  | binning frequency |
+| `replicas`       | `1`                  | independent runs (run in parallel) |
+| `seed`           | `0xc0ffee5eed5eed5e` | RNG seed (reproducibility) |
+| `output_csv`     | (empty)              | optional running-mean time series |
+
+## Example output
+
+```
+==============================================================
+  qmc_sse  v0.1.0  (2026-04-23T12:34:56)
+==============================================================
+  lattice         : chain[L=32]
+  N_sites         : 32
+  N_bonds         : 32
+  bipartite       : yes
+  model           : antiferromagnetic Heisenberg
+  J               : 1
+  beta            : 4
+  thermalization  : 5000 sweeps
+  measurements    : 50000 sweeps
+  replicas        : 4
+  threads (OpenMP): 8
+==============================================================
+
+…
+
+===== combined estimates over 4 replica(s) =====
+  energy/site                 -4.42e-01  +/-  3.1e-04
+  |m_z|                        2.71e-02  +/-  4.0e-04
+  m_stag^2                     5.93e-02  +/-  6.2e-04
+  chi_uniform                  1.10e-01  +/-  1.4e-03
+  chi_stag                     1.45e+00  +/-  1.6e-02
 ```
 
-### Available Options
+## Project layout
 
-**Lattice types:**
-- `chain`: 1D chain
-- `square`: 2D square lattice
-- `triangular`: 2D triangular lattice
-- `honeycomb`: 2D honeycomb lattice
-- `kagome`: 2D kagome lattice
-- `cubic`: 3D cubic lattice
-
-**Model types:**
-- `heisenberg`: H = J(S_x·S_x + S_y·S_y + S_z·S_z)
-- `xxz`: H = J_xy(S_x·S_x + S_y·S_y) + J_z·S_z·S_z
-- `xy`: H = J(S_x·S_x + S_y·S_y)
-- `ising`: H = J·S_z·S_z
+```
+include/qmc/        single-header library (everything is inline)
+  types.hpp           common typedefs / op-code packing
+  rng.hpp             PCG32 RNG + Lemire bounded ints
+  config.hpp          dependency-free key=value parser
+  logging.hpp         thread-safe logger
+  lattice.hpp         lattice abstraction + chain / square / honeycomb
+  heisenberg.hpp      AF Heisenberg bond Hamiltonian parameters
+  operator_string.hpp SSE operator string + linked-vertex list
+  sse_engine.hpp      diagonal + operator-loop + free-spin updates
+  observable.hpp      log-binning analysis + jackknife
+  measurements.hpp    standard observable set
+  output.hpp          CSV writer / timestamps
+  qmc.hpp             umbrella header
+apps/qmc_sse.cpp    CLI driver (OpenMP replica parallelism)
+tests/              minimal home-grown test harness + tests
+benchmarks/         throughput benchmark
+examples/           ready-to-run config files
+docs/               algorithm notes & references
+```
 
 ## Algorithm
 
-The SSE algorithm represents the partition function as:
+- [`docs/ALGORITHM.md`](docs/ALGORITHM.md) — quick markdown notes on
+  the implementation (data structures, update rules, estimators).
+- [`docs/sse_qmc.tex`](docs/sse_qmc.tex) — full pedagogical write-up
+  in LaTeX (derivation of the SSE expansion, Marshall sign
+  transformation, operator-loop construction, observables, error
+  analysis). Build with `make -C docs` to produce `docs/sse_qmc.pdf`.
+- [`docs/REFERENCES.md`](docs/REFERENCES.md) — the literature the
+  implementation actually follows.
 
-$$Z = \text{Tr}\left[\sum_{n=0}^{\infty} \frac{\beta^n}{n!} (-H)^n\right]$$
+## Limitations
 
-The simulation samples operator strings using:
-
-1. **Diagonal Update**: Insert/remove diagonal operators with Metropolis acceptance
-2. **Loop Update**: Modify operator string using directed loop algorithm for efficient sampling
-
-### Key References
-
-1. A. W. Sandvik, "Stochastic series expansion method with operator-loop update", Phys. Rev. B 59, R14157 (1999)
-2. O. F. Syljuåsen and A. W. Sandvik, "Quantum Monte Carlo with directed loops", Phys. Rev. E 66, 046701 (2002)
-3. A. W. Sandvik, "Computational Studies of Quantum Spin Systems", AIP Conf. Proc. 1297, 135 (2010)
-
-## Library API
-
-```cpp
-#include <sse.hpp>
-
-using namespace sse;
-
-// Create lattice
-auto lattice = Lattice::square(16, 16);
-
-// Create Hamiltonian
-auto H = Hamiltonian::heisenberg(1.0);  // J = 1
-
-// Set up simulation
-SimulationParams params;
-params.beta = 2.0;
-params.n_therm = 10000;
-params.n_sweeps = 100000;
-
-SSESimulation sim(lattice, H, params);
-sim.initialize();
-sim.thermalize();
-sim.run();
-
-// Get results
-const auto& meas = sim.getMeasurements();
-std::cout << "Energy: " << meas.energy() << " ± " << meas.energyError() << "\n";
-```
-
-### Custom Hamiltonian
-
-```cpp
-// Create custom 4x4 bond Hamiltonian matrix
-BondMatrix H_custom;
-H_custom << 0.25,  0,    0,    0,
-            0,    -0.25, 0.5,  0,
-            0,     0.5, -0.25, 0,
-            0,     0,    0,    0.25;
-
-auto H = Hamiltonian::custom(H_custom);
-```
-
-### Custom Lattice
-
-```cpp
-// Define bonds manually
-std::vector<Bond> bonds = {
-    {0, 1, 0},  // Site 0 to Site 1, type 0
-    {1, 2, 0},
-    {2, 0, 1},  // Different bond type
-    // ...
-};
-
-auto lattice = Lattice::custom(n_sites, bonds);
-```
-
-## Output Format
-
-Results are saved in JSON format:
-
-```json
-{
-    "parameters": {
-        "lattice": "square",
-        "L": 16,
-        "beta": 2.0,
-        "model": "heisenberg",
-        "J": 1.0
-    },
-    "results": {
-        "energy": {"mean": -0.6694, "error": 0.0002},
-        "specific_heat": {"mean": 0.127, "error": 0.003},
-        "magnetization_sq": {"mean": 0.0156, "error": 0.0001},
-        "susceptibility": {"mean": 0.985, "error": 0.015},
-        "stag_magnetization": {"mean": 0.0892, "error": 0.0003}
-    }
-}
-```
-
-## Performance
-
-Typical performance on modern hardware (single core):
-
-| System Size | Sweeps/second |
-|-------------|---------------|
-| 8×8         | ~10,000       |
-| 16×16       | ~2,500        |
-| 32×32       | ~600          |
-| 64×64       | ~150          |
-
-Performance scales approximately as O(N) where N is the number of sites.
-
-## Directory Structure
-
-```
-QMC_cpp/
-├── CMakeLists.txt          # Build configuration
-├── README.md               # This file
-├── include/
-│   └── sse/
-│       ├── types.hpp       # Type definitions
-│       ├── random.hpp      # Random number generator
-│       ├── lattice.hpp     # Lattice structures
-│       ├── hamiltonian.hpp # Hamiltonian definitions
-│       ├── vertex.hpp      # Vertex data for SSE
-│       ├── sse_config.hpp  # Configuration state
-│       ├── measurements.hpp# Physical observables
-│       └── sse_simulation.hpp # Main simulation class
-├── src/
-│   ├── main.cpp            # Command-line interface
-│   ├── lattice.cpp
-│   ├── hamiltonian.cpp
-│   ├── vertex.cpp
-│   ├── sse_config.cpp
-│   ├── sse_simulation.cpp
-│   ├── measurements.cpp
-│   └── random.cpp
-├── tests/
-│   ├── test_main.cpp
-│   ├── test_lattice.cpp
-│   ├── test_hamiltonian.cpp
-│   └── test_simulation.cpp
-├── benchmarks/
-│   └── benchmark.cpp
-└── examples/
-    ├── heisenberg_square.json
-    └── heisenberg_triangular.json
-```
-
-## Extending the Code
-
-### Adding a New Lattice
-
-1. Add static factory method to `Lattice` class in `include/sse/lattice.hpp`
-2. Implement in `src/lattice.cpp`
-
-### Adding a New Model
-
-1. Add static factory method to `Hamiltonian` class in `include/sse/hamiltonian.hpp`
-2. Implement in `src/hamiltonian.cpp`
-
-### Adding New Measurements
-
-1. Add observable to `Measurements` class in `include/sse/measurements.hpp`
-2. Implement measurement in `src/measurements.cpp`
+- Only the AF Heisenberg model is implemented at present. The data
+  structures (operator string, linked vertices, binning analysis) are
+  generic; adding e.g. the transverse-field Ising model is mostly a
+  matter of writing a new diagonal-update / vertex-table module.
+- Frustrated lattices (triangular, kagome, …) are *not* supported by
+  the operator-loop update — they suffer from the standard sign
+  problem.
+- No off-the-shelf parallel tempering / replica exchange yet (each
+  replica runs at the same `(beta, J)`).
 
 ## License
 
-MIT License
-
-## Citation
-
-If you use this code, please cite:
-
-```bibtex
-@software{sse_qmc,
-    title = {SSE Quantum Monte Carlo for Spin Systems},
-    author = {Your Name},
-    year = {2024},
-    url = {https://github.com/your-repo}
-}
-```
-
-## Contributing
-
-Contributions are welcome! Please open an issue or submit a pull request.
+MIT.  See [`LICENSE`](LICENSE).
