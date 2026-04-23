@@ -1,4 +1,4 @@
-# Agent guidelines for qmc_sse
+# Agent guidelines for qmc_sse / qmc_dqmc
 
 Conventions to follow when modifying this codebase:
 

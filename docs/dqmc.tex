@@ -1,0 +1,390 @@
+\documentclass[11pt,a4paper]{article}
+
+% ----------------------------------------------------------------------------
+% Pedagogical write-up of the DQMC algorithm implemented in qmc_dqmc.
+% Compile with:  pdflatex dqmc.tex   (twice for the table of contents)
+% ----------------------------------------------------------------------------
+
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{physics}
+\usepackage{braket}
+\usepackage{bm}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,decorations.pathreplacing,calc}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    citecolor=blue!50!black,
+    urlcolor=blue!50!black,
+    pdftitle={Determinant Quantum Monte Carlo for the Hubbard model},
+    pdfauthor={qmc\_sse contributors}
+}
+
+\renewcommand{\Tr}{\operatorname{Tr}}
+\newcommand{\eg}{e.g.\ }
+\newcommand{\ie}{i.e.\ }
+\newcommand{\Hop}{\hat H}
+\newcommand{\Bm}[2]{B_{#1,#2}}
+\newcommand{\Ns}{N_{s}}
+\newcommand{\Lt}{L_\tau}
+\newcommand{\dt}{\Delta\tau}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+
+\title{\bfseries Determinant Quantum Monte Carlo for the Hubbard model\\
+       \large A self-contained derivation of the BSS algorithm and its
+              implementation in \texttt{qmc\_dqmc}}
+\author{\texttt{qmc\_dqmc} contributors}
+\date{}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\bigskip
+
+\section{Overview}
+
+The Determinant Quantum Monte Carlo (DQMC) algorithm of
+Blankenbecler, Scalapino and Sugar~\cite{BSS1981}, equipped with the
+Hirsch~\cite{Hirsch1983} discrete Hubbard--Stratonovich transformation,
+is the canonical tool for unbiased finite-temperature simulations of
+the repulsive Hubbard model. This document derives the algorithm
+implemented in \texttt{qmc\_dqmc}, focusing on the practical equations
+needed to read the code in \texttt{include/qmc/dqmc\_engine.hpp}.
+
+The companion document \texttt{sse\_qmc.tex} treats the SSE algorithm
+for spin systems; the present notes are independent and use a similar
+notation. See also the implementation summary in \texttt{docs/DQMC.md}.
+
+\section{Model and conventions}
+
+We simulate the single-band Hubbard model on a generic lattice with
+periodic boundary conditions:
+\begin{equation}
+\Hop = -t \sum_{\langle ij\rangle, \sigma}
+            \left( c^{\dagger}_{i\sigma} c_{j\sigma} + \text{h.c.} \right)
+       - \mu \sum_{i\sigma} n_{i\sigma}
+       + U \sum_{i} \left(n_{i\uparrow} - \tfrac{1}{2}\right)
+                    \left(n_{i\downarrow} - \tfrac{1}{2}\right) .
+\label{eq:hubbard}
+\end{equation}
+The symmetric \(\bigl(n - \tfrac{1}{2}\bigr)\) form makes
+\(\mu = 0\) coincide with half-filling on bipartite lattices by
+particle--hole symmetry. We collect the kinetic and chemical-potential
+terms into a single-particle matrix
+\(K\in\mathbb{R}^{\Ns\times\Ns}\) with
+\(K_{ij} = -t\) for nearest neighbours and \(K_{ii} = -\mu\).
+
+\section{Trotter decomposition and HS transformation}
+
+Discretise imaginary time as \(\beta = \Lt \dt\). To leading order
+in \(\dt\),
+\begin{equation}
+e^{-\beta \Hop} = \prod_{l = 0}^{\Lt - 1}
+   e^{-\dt K} \, e^{-\dt \, V} + \mathcal{O}(\dt^2),
+\label{eq:trotter}
+\end{equation}
+where \(V = U\sum_i (n_{i\uparrow}-\tfrac12)(n_{i\downarrow}-\tfrac12)\).
+Hirsch's discrete HS identity decouples the on-site quartic term:
+\begin{equation}
+e^{-\dt U (n_{i\uparrow}-\tfrac12)(n_{i\downarrow}-\tfrac12)}
+   = \frac{e^{-\dt U/4}}{2}
+     \sum_{s = \pm 1} e^{\alpha s (n_{i\uparrow} - n_{i\downarrow})},
+\qquad \cosh \alpha = e^{\dt U / 2}.
+\label{eq:HS}
+\end{equation}
+Introducing one Hubbard--Stratonovich field \(s_{l,i}\in\{-1,+1\}\) at
+every site of every Trotter slice, we obtain
+\begin{equation}
+Z = \Tr e^{-\beta\Hop}
+  = \frac{e^{-\beta U \Ns / 4}}{2^{\Ns \Lt}}
+    \sum_{\{s_{l,i}\}}
+    \det M_{\uparrow}(s) \, \det M_{\downarrow}(s),
+\label{eq:Z}
+\end{equation}
+with the single-particle propagation matrices
+\begin{equation}
+M_\sigma(s) = \mathbb{1}
+            + \Bm{\Lt-1}{\sigma} \Bm{\Lt-2}{\sigma} \cdots \Bm{0}{\sigma},
+\qquad
+\Bm{l}{\sigma}(s) = e^{-\dt K} e^{V_{l,\sigma}(s)},
+\label{eq:Bdef}
+\end{equation}
+where \(V_{l,\sigma}(s) = \alpha\,\sigma\,\mathrm{diag}(s_{l,1},\ldots,s_{l,\Ns})\)
+(here \(\sigma=\pm 1\) for \(\uparrow,\downarrow\)). The \(B\) matrices
+are \(\Ns\times\Ns\) and are computed lazily, never stored, in the
+implementation.
+
+\paragraph{Sign-free regime.}
+On bipartite lattices at \(\mu=0\) particle--hole symmetry maps
+\(c_{i\sigma} \mapsto (-1)^{a_i} c^{\dagger}_{i\sigma}\) (with
+\(a_i\) the sublattice label) and exchanges the two spin sectors,
+giving \(\det M_\uparrow(s) = \det M_\downarrow(s)\) for every aux-field
+configuration. The product \(\det M_\uparrow \det M_\downarrow \ge 0\),
+so the Monte Carlo weight is non-negative and the sign problem is
+absent. Away from half-filling the sign decays as
+\(\langle\mathrm{sign}\rangle \sim e^{-\beta U f(\rho,T)}\) and rapidly
+becomes the limiting factor in low-temperature simulations of the doped
+Hubbard model.
+
+\section{Equal-time Green's function}
+
+The fundamental object measured by DQMC is the equal-time Green's
+function on time slice \(l\),
+\begin{equation}
+G_\sigma(l)_{ij} = \big\langle c_{i\sigma}\, c^{\dagger}_{j\sigma} \big\rangle_{l}
+                 = \big[\mathbb{1} + A_\sigma(l)\big]^{-1}_{ij},
+\label{eq:Gdef}
+\end{equation}
+where the cyclic ordering of the propagator product is the
+\emph{convention} that determines the form of the local-update
+acceptance ratio. We adopt the \emph{pre-\(B_l\)} convention,
+\begin{equation}
+A_\sigma(l) =
+  \Bm{l-1}{\sigma}\Bm{l-2}{\sigma}\cdots
+  \Bm{0}{\sigma}\Bm{\Lt-1}{\sigma}\cdots\Bm{l+1}{\sigma}\Bm{l}{\sigma},
+\label{eq:Aconv}
+\end{equation}
+which leads (Sec.~\ref{sec:update}) to the simple ratio
+\(r = 1 + \Delta(1-G_{ii})\). All Wick-theorem-based observables are
+expressed below in the same convention.
+
+\section{Single-spin-flip update}\label{sec:update}
+
+A flip \(s_{l,i} \mapsto -s_{l,i}\) modifies only \(\Bm{l}{\sigma}\):
+\(\Bm{l}{\sigma}\to \Bm{l}{\sigma}\bigl(\mathbb{1} +
+\Delta_\sigma E_{ii}\bigr)\) where \(E_{ii}\) is the rank-one matrix
+with a single \(1\) at position \((i,i)\) and
+\begin{equation}
+\Delta_\uparrow   = e^{-2\alpha s_{l,i}} - 1,
+\qquad
+\Delta_\downarrow = e^{+2\alpha s_{l,i}} - 1.
+\end{equation}
+In the pre-\(B_l\) convention, this multiplies \(A\) on the
+\emph{right}: \(A' = A(\mathbb{1} + \Delta E_{ii})\). A single Sherman--Morrison
+identity then gives the determinant ratio
+\begin{equation}
+\boxed{\;
+R_\sigma \equiv \frac{\det(\mathbb{1} + A'_\sigma)}{\det(\mathbb{1} + A_\sigma)}
+       = 1 + \Delta_\sigma\bigl(1 - G_\sigma(i,i)\bigr).
+\;}
+\label{eq:Rratio}
+\end{equation}
+The Metropolis acceptance probability is
+\(p = \min\!\bigl(1,\; \lvert R_\uparrow R_\downarrow\rvert\bigr)\).
+
+If the flip is accepted, the equal-time Green's function is updated
+exactly by another Sherman--Morrison step. Setting
+\(u_j = \delta_{ji} - G_\sigma(j,i)\) and noting that
+\(v = e_i\),
+\begin{equation}
+G'_\sigma = \biggl(\mathbb{1} - \frac{u\, e_i^{\!\top}}{R_\sigma}\biggr) G_\sigma,
+\qquad
+G'_\sigma(j,k) = G_\sigma(j,k)
+   - \frac{\Delta_\sigma}{R_\sigma}
+     \bigl(\delta_{ji} - G_\sigma(j,i)\bigr) G_\sigma(i,k).
+\label{eq:SMupdate}
+\end{equation}
+This is an \(O(\Ns^2)\) outer product per accepted move (and
+\(O(\Ns)\) per proposal for the ratio).
+
+\section{Wrapping between time slices}
+
+After all single-spin updates at slice \(l\) we advance to slice
+\(l+1\). From the cyclic ordering of \(A(l)\) one gets directly
+\begin{equation}
+A_\sigma(l+1) = \Bm{l}{\sigma} \, A_\sigma(l) \, \Bm{l}{\sigma}^{-1},
+\qquad
+\boxed{\;
+G_\sigma(l+1) = \Bm{l}{\sigma} \, G_\sigma(l) \, \Bm{l}{\sigma}^{-1}.
+\;}
+\label{eq:wrap}
+\end{equation}
+With \(\Bm{l}{\sigma} = e^{-\dt K} \cdot \mathrm{diag}(d)\) and
+\(\Bm{l}{\sigma}^{-1} = \mathrm{diag}(d^{-1}) \cdot e^{+\dt K}\),
+the order of operations matters because \(\mathrm{diag}(d^{-1})\) does
+\emph{not} commute with \(e^{+\dt K}\):
+\begin{equation}
+G_\sigma(l+1)
+  = e^{-\dt K} \,
+    \bigl[\mathrm{diag}(d) \cdot G_\sigma(l) \cdot \mathrm{diag}(d^{-1})\bigr]
+    \, e^{+\dt K} .
+\label{eq:wrap-impl}
+\end{equation}
+\Cref{eq:wrap-impl} is what the code in \texttt{wrap\_green\_up\_} and
+\texttt{wrap\_green\_dn\_} actually computes; getting this ordering
+wrong is a subtle source of physical error that \emph{vanishes
+identically} at \(U=0\), so the free-fermion regression test does not
+catch it.
+
+\section{Numerical stabilization}
+
+The matrix product
+\(A_\sigma(l) = \Bm{l-1}{\sigma}\cdots\Bm{l}{\sigma}\) is catastrophically
+ill-conditioned at low temperatures: each \(e^{-\dt K}\) factor stretches
+some directions by \(e^{+\dt \lambda_{\max}(K)}\) and contracts others by
+\(e^{-\dt \lambda_{\min}(K)}\), so the singular values of \(A\) span
+\(\sim e^{2\beta\lVert K\rVert}\) and the naive product loses all precision
+within a few tens of slices.
+
+We follow the standard remedy of Loh and
+Gubernatis~\cite{LohGubernatis1992}: maintain an explicit
+QR factorisation \((Q,R)\) of the partial product as we left-multiply by
+each \(B\). Concretely:
+\begin{enumerate}[leftmargin=*]
+    \item Initialise \(Q = R = \mathbb{1}\) and an accumulator \(C = \mathbb{1}\).
+    \item For \(\text{step} = 0, 1, \ldots, \Lt - 1\): set
+          \(C \leftarrow B_{(l + \text{step})\!\!\mod \Lt}\, C\). Every
+          \texttt{n\_stab} steps, refactorise
+          \(C\,Q = Q' R'\) by Householder QR, then update
+          \(Q \leftarrow Q'\), \(R \leftarrow R'\,R\), \(C \leftarrow \mathbb{1}\).
+    \item After the last step, the partial product equals \(Q R\)
+          exactly, with \(Q\) orthogonal to working precision.
+\end{enumerate}
+Then
+\begin{equation}
+G_\sigma = (\mathbb{1} + Q R)^{-1}
+        = \bigl(Q\,(Q^{\!\top} + R)\bigr)^{-1}
+        = (Q^{\!\top} + R)^{-1}\, Q^{\!\top},
+\label{eq:Gqr}
+\end{equation}
+which is solved by a plain LU on \((Q^{\!\top} + R)\). Even though
+\(R\) itself can have a huge dynamical range, the linear system
+\eqref{eq:Gqr} is conditioned by \(G\) (whose entries are
+\(O(1)\)), and the solve is stable. In our test runs the
+\texttt{max\_recompute\_drift} reported by the engine -- the
+\(\ell^\infty\) discrepancy between the wrapped \(G\) and the freshly
+recomputed \(G\) -- stays at machine precision (\(\le 10^{-12}\)) for
+all parameter regimes we have tried up to \(\beta U \sim 32\),
+\(\Ns = 36\).
+
+\section{Observables}
+
+For a fixed Hubbard--Stratonovich configuration the system is
+non-interacting and Wick's theorem applies exactly. With our convention
+\(G_\sigma(i,j)=\langle c_{i\sigma} c^{\dagger}_{j\sigma}\rangle\) we have
+\(\langle n_{i\sigma}\rangle = 1 - G_\sigma(i,i)\) and
+\begin{equation}
+\langle S^z_i S^z_j \rangle = \tfrac{1}{4}\Bigl[
+  (1 - G_\uparrow(i,i))(1 - G_\uparrow(j,j))
++ (1 - G_\downarrow(i,i))(1 - G_\downarrow(j,j))
+\end{equation}
+\vspace{-2em}
+\begin{equation}
+\hphantom{\langle S^z_i S^z_j \rangle = \tfrac{1}{4}\Bigl[}
+- 2(1 - G_\uparrow(i,i))(1 - G_\downarrow(j,j))
++ (\delta_{ij} - G_\uparrow(j,i))\,G_\uparrow(i,j)
++ (\uparrow\!\leftrightarrow\!\downarrow)
+\Bigr].
+\end{equation}
+The implementation evaluates
+\(\langle n\rangle\), the double occupancy
+\(\frac{1}{\Ns}\sum_i (1-G_\uparrow(i,i))(1-G_\downarrow(i,i))\),
+\(\langle m_z^2\rangle = (1/\Ns^2)\sum_{ij}\langle S^z_iS^z_j\rangle\),
+the staggered moment
+\(\langle m_{\text{stag}}^2\rangle = (1/\Ns^2)\sum_{ij} (-1)^{a_i+a_j}
+   \langle S^z_iS^z_j\rangle\),
+and the antiferromagnetic structure factor
+\(S(\pi,\pi) = (1/\Ns)\sum_{ij}(-1)^{a_i+a_j}\langle S^z_iS^z_j\rangle\).
+Errors use the same Flyvbjerg--Petersen logarithmic binning analysis as
+the SSE code (\texttt{qmc::Observable}).
+
+\section{Verification}
+
+The free-fermion limit ($U=0$) is the most powerful regression test:
+the auxiliary field decouples, every configuration produces the same
+analytical Green's function, and the simulation must reproduce it to
+machine precision. Concretely,
+\begin{equation}
+\bigl\lvert G_\sigma^{\text{DQMC}} - (\mathbb{1} + e^{-\beta K})^{-1} \bigr\rvert_{\infty}
+   < 10^{-13}
+\end{equation}
+both at initialisation and after a full sweep on the L=8 chain at
+$\beta = 4$ (\texttt{tests/test\_dqmc.cpp}).
+
+A second exact identity ---
+\(\langle n\rangle = 1\) per configuration on a half-filled bipartite
+lattice --- is reproduced to $\sim 10^{-9}$ on the L=4 chain at
+$U=4,\beta=2$. The reported average sign is exactly $+1$ in this
+sign-free regime.
+
+\Cref{tab:dqmc-bench} summarises a handful of moderate runs that
+illustrate the expected physics:
+\begin{table}[h!]
+\centering
+\begin{tabular}{lccccc}
+\toprule
+System & $\beta$ & $\langle n\rangle$ & $\langle n_\uparrow n_\downarrow\rangle$
+       & $S(\pi,\pi)$ & $\langle\mathrm{sign}\rangle$\\
+\midrule
+chain $L=8$, $U=2$  & 4 & $1.000$ & $0.169$ & $0.36$  & $1.0$\\
+square $4{\times}4$, $U=4$  & 4 & $1.000$ & $0.124$ & $0.66$  & $1.0$\\
+square $6{\times}6$, $U=4$  & 8 & $1.000$ & $0.120$ & $1.58$  & $1.0$\\
+\bottomrule
+\end{tabular}
+\caption{Equal-time observables on three half-filled benchmarks. The
+growth of $S(\pi,\pi)$ with system size and $\beta$ reflects the
+expected antiferromagnetic ordering tendency of the half-filled square
+Hubbard model.}
+\label{tab:dqmc-bench}
+\end{table}
+
+\section*{Code map}
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{ll}
+\toprule
+File & Purpose\\
+\midrule
+\texttt{include/qmc/linalg.hpp}            & Dense matrix, GEMM, LU, QR, exp$(-\dt K)$, stable $G$\\
+\texttt{include/qmc/hubbard.hpp}           & Hubbard parameters, kinetic matrix\\
+\texttt{include/qmc/dqmc\_engine.hpp}      & B-builder, sweep, Sherman--Morrison, wrap, recompute\\
+\texttt{include/qmc/dqmc\_measurements.hpp}& Equal-time observables (Wick contractions)\\
+\texttt{apps/qmc\_dqmc.cpp}                & CLI driver, OpenMP parallel replicas\\
+\texttt{tests/test\_dqmc.cpp}              & Free-fermion + half-filling regression tests\\
+\texttt{tests/test\_linalg.cpp}            & Linear algebra unit tests\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{thebibliography}{9}
+\bibitem{BSS1981}
+R.~Blankenbecler, D.~J.~Scalapino, R.~L.~Sugar,
+\emph{Monte Carlo calculations of coupled boson--fermion systems. I},
+Phys. Rev. D \textbf{24}, 2278 (1981).
+
+\bibitem{Hirsch1983}
+J.~E.~Hirsch,
+\emph{Discrete Hubbard--Stratonovich transformation for fermion lattice models},
+Phys. Rev. B \textbf{28}, 4059 (1983).
+
+\bibitem{LohGubernatis1992}
+E.~Y.~Loh~Jr.\ and J.~E.~Gubernatis,
+\emph{Stable numerical simulations of models of interacting electrons in
+condensed-matter physics}, in
+\emph{Electronic Phase Transitions}, ed.\ W.~Hanke and Yu.~V.~Kopaev,
+Modern Problems in Condensed Matter Sciences \textbf{32}, 177 (1992).
+
+\bibitem{Assaad2008}
+F.~F.~Assaad and H.~G.~Evertz,
+\emph{World-line and Determinantal Quantum Monte Carlo Methods for
+Spins, Phonons and Electrons},
+Lect.\ Notes Phys.\ \textbf{739}, 277 (2008).
+\end{thebibliography}
+
+\end{document}

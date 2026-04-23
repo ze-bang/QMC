@@ -5,8 +5,12 @@
 #pragma once
 
 #include "qmc/config.hpp"
+#include "qmc/dqmc_engine.hpp"
+#include "qmc/dqmc_measurements.hpp"
 #include "qmc/heisenberg.hpp"
+#include "qmc/hubbard.hpp"
 #include "qmc/lattice.hpp"
+#include "qmc/linalg.hpp"
 #include "qmc/logging.hpp"
 #include "qmc/measurements.hpp"
 #include "qmc/observable.hpp"

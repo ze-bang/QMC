@@ -1,31 +1,32 @@
-# Build the pedagogical SSE QMC LaTeX document.
+# Build the pedagogical LaTeX documents (SSE and DQMC).
 #
-#   make           -> sse_qmc.pdf
-#   make clean     -> remove auxiliary files
-#   make distclean -> also remove the PDF
+#   make            -> both PDFs
+#   make sse_qmc.pdf
+#   make dqmc.pdf
+#   make clean      -> remove auxiliary files
+#   make distclean  -> also remove the PDFs
 
 LATEX     ?= pdflatex
 LATEXOPTS ?= -interaction=nonstopmode -halt-on-error
 
-DOC      = sse_qmc
-SRC      = $(DOC).tex
-PDF      = $(DOC).pdf
+DOCS     = sse_qmc dqmc
+PDFS     = $(addsuffix .pdf,$(DOCS))
 AUX_EXT  = aux log out toc bbl blg fls fdb_latexmk synctex.gz
 
 .PHONY: all clean distclean view
 
-all: $(PDF)
+all: $(PDFS)
 
-$(PDF): $(SRC)
-	@$(LATEX) $(LATEXOPTS) $(SRC) >/dev/null
-	@$(LATEX) $(LATEXOPTS) $(SRC) >/dev/null
-	@echo "  PDF  $(PDF) ($$(wc -c < $(PDF)) bytes, $$(pdfinfo $(PDF) 2>/dev/null | awk '/Pages/ {print $$2 " pages"}'))"
+%.pdf: %.tex
+	@$(LATEX) $(LATEXOPTS) $< >/dev/null
+	@$(LATEX) $(LATEXOPTS) $< >/dev/null
+	@printf "  PDF  %s (%s bytes, %s pages)\n" $@ "$$(wc -c < $@)" "$$(pdfinfo $@ 2>/dev/null | awk '/Pages/ {print $$2}')"
 
 clean:
-	@rm -f $(addprefix $(DOC)., $(AUX_EXT))
+	@for d in $(DOCS); do rm -f $$(printf "$$d.%s " $(AUX_EXT)); done
 
 distclean: clean
-	@rm -f $(PDF)
+	@rm -f $(PDFS)
 
-view: $(PDF)
-	@xdg-open $(PDF) >/dev/null 2>&1 &
+view: $(PDFS)
+	@for p in $(PDFS); do xdg-open $$p >/dev/null 2>&1 & done

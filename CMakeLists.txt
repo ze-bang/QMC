@@ -81,8 +81,11 @@ endif()
 # -----------------------------------------------------------------------------
 # CLI driver
 # -----------------------------------------------------------------------------
-add_executable(qmc_sse apps/qmc_sse.cpp)
-target_link_libraries(qmc_sse PRIVATE qmc_sse_lib)
+add_executable(qmc_sse  apps/qmc_sse.cpp)
+target_link_libraries(qmc_sse  PRIVATE qmc_sse_lib)
+
+add_executable(qmc_dqmc apps/qmc_dqmc.cpp)
+target_link_libraries(qmc_dqmc PRIVATE qmc_sse_lib)
 
 # -----------------------------------------------------------------------------
 # Tests
@@ -109,7 +112,7 @@ endif()
 # Install / export
 # -----------------------------------------------------------------------------
 include(GNUInstallDirs)
-install(TARGETS qmc_sse RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS qmc_sse qmc_dqmc RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 # Friendly final message.
